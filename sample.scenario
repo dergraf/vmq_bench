@@ -1,0 +1,44 @@
+{publisher_config, [
+    {start_after, 0}, %% start right away
+    {max_concurrency, 10},
+    {connect_opts, [
+        {clean_session, true}
+        %% {keepalive, 60},
+        %% {username, ""},
+        %% {password, ""},
+        %% {proto_Ver, 3},
+        %% {will_topic, ""},
+        %% {will_qos, 0},
+        %% {will_retain, false},
+        %% {will_payload, <<>>}
+    ]},
+    {publish_opts, [
+        {retain, false}
+        %% {dup, false}
+
+    ]},
+    {topics, [{"/test/topic", 0}]},
+    {payload, [{min, 100}, {max, 1000}]},
+    {interval, 1000}, %% interval should be shorter than connect_opts.keepalive
+    {stop_after, 0}, %% never stop
+    {hosts, [{"localhost", 1883}]}
+]}.
+
+{consumer_config, [
+    {start_after, 10}, %% start right away
+    {stop_after, 0}, %% never stop
+    {hosts, [{"localhost", 1883}]},
+    {max_concurrency, 1},
+    {connect_opts, [
+        {clean_session, true}
+        %% {keepalive, 60},
+        %% {username, ""},
+        %% {password, ""},
+        %% {proto_Ver, 3},
+        %% {will_topic, ""},
+        %% {will_qos, 0},
+        %% {will_retain, false},
+        %% {will_payload, <<>>}
+    ]},
+    {topics, [{"/test/topic", 0}]}
+]}.

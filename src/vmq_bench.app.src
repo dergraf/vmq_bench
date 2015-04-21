@@ -1,0 +1,12 @@
+{application, vmq_bench,
+ [
+  {description, ""},
+  {vsn, "1"},
+  {registered, []},
+  {applications, [
+                  kernel,
+                  stdlib
+                 ]},
+  {mod, { vmq_bench_app, []}},
+  {env, []}
+ ]}.

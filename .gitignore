@@ -1,0 +1,8 @@
+*.beam
+.eunit
+*.app
+*.png
+deps
+erl_crash.dump
+*.csv
+.rebar
