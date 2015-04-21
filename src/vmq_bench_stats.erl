@@ -173,6 +173,7 @@ handle_info(dump, #state{fd=Fd} = State) ->
     NrOfCons = length(supervisor:which_children(vmq_bench_con_sup)),
 
     Lats = ets:lookup(?TBL_LAT, OldUnixTs),
+    ets:delete(?TBL_LAT, OldUnixTs),
     {AvgLatency, MedianLatency, VarianceLatency} =
     case length(Lats) of
         0 ->
