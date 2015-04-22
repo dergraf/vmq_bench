@@ -86,7 +86,9 @@ do_client_connect(ConnectPacket, ConnackPacket, Opts) ->
                 E ->
                     gen_tcp:close(Socket),
                     E
-            end
+            end;
+        E ->
+            E
     end.
 
 

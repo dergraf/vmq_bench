@@ -57,10 +57,11 @@ start_link(Config) ->
 init([Config]) ->
     {A, B, C} = now(),
     random:seed(A, B, C),
-    ClientId = "vmq-con-" ++ integer_to_list(erlang:phash2({A,B,C})),
     StartAfter = proplists:get_value(start_after, Config, 0),
     Hosts = proplists:get_value(hosts, Config, [{"localhost", 1883}]),
     ConnectOpts = proplists:get_value(connect_opts, Config, []),
+    ClientId = proplists:get_value(client_id, ConnectOpts,
+                                   "vmq-con-" ++ integer_to_list(erlang:phash2({A,B,C}))),
     Keepalive = proplists:get_value(keepalive, ConnectOpts, 60), %% packet.erl uses 60 as default
     erlang:send_after(Keepalive  * 1000, self(), ping),
 
@@ -133,7 +134,7 @@ handle_info(timeout, #state{socket=undefined} = State) ->
     Connect = packet:gen_connect(ClientId, ConnectOpts),
     Connack = packet:gen_connack(),
     {ok, Socket} = packet:do_client_connect(Connect, Connack,
-                                            [{host, Host}, {port, Port}]),
+                                            [{hostname, Host}, {port, Port}]),
     Subscribe = packet:gen_subscribe(1, Topic, QoS),
     ok = gen_tcp:send(Socket, Subscribe),
     Suback = packet:gen_suback(1, QoS),

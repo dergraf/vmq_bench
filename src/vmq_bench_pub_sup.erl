@@ -28,15 +28,16 @@ start_link() ->
 
 start_publishers([Config|Rest]) ->
     MaxConcurrency = proplists:get_value(max_concurrency, Config, 1),
-    start_publisher(MaxConcurrency, Config),
+    Topics = proplists:get_value(topics, Config, []),
+    start_publisher(MaxConcurrency, Topics, lists:keydelete(topics, 1, Config)),
     start_publishers(Rest);
 start_publishers([]) -> ok.
 
-start_publisher(0, _) -> ok;
-start_publisher(N, Config) ->
-    {ok, _} = supervisor:start_child(?MODULE, [Config]),
+start_publisher(0, _, _) -> ok;
+start_publisher(N, [T|Topics], Config) ->
+    {ok, _} = supervisor:start_child(?MODULE, [[{topic, T}|Config]]),
     timer:sleep(10),
-    start_publisher(N - 1, Config).
+    start_publisher(N - 1, Topics ++ [T], Config).
 
 
 %%%===================================================================

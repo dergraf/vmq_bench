@@ -27,6 +27,17 @@
                 next_mid=1,
                 counters=vmq_bench_stats:init_counters(pub)}).
 
+-define(SAMPLE_200, <<232,234,92,12,186,64,108,179,174,21,60,242,203,145,103,58,236,209,172,148,
+                      236,19,99,121,235,215,156,161,163,219,199,114,102,192,155,163,18,39,179,195,
+                      202,91,137,62,39,15,25,148,169,130,188,70,86,191,135,38,91,46,251,219,107,4,
+                      104,125,71,12,252,162,117,102,174,30,148,117,94,147,165,183,147,45,14,151,
+                      183,225,220,212,33,105,60,199,199,3,89,212,156,160,79,109,140,127,115,85,179,
+                      133,197,243,212,0,201,71,4,82,200,227,223,30,151,31,103,112,71,40,235,144,60,
+                      85,7,224,119,239,164,125,47,50,76,204,11,142,63,47,240,94,68,90,227,34,114,
+                      90,118,51,187,139,233,163,37,186,203,61,241,109,126,5,63,141,105,154,16,181,
+                      176,19,242,221,183,2,95,78,43,241,24,162,0,201,247,22,207,182,51,94,174,155,
+                      128,200,220,32,2,161,235,61,38,68>>).
+
 %%%===================================================================
 %%% API functions
 %%%===================================================================
@@ -59,13 +70,14 @@ start_link(Config) ->
 init([Config]) ->
     {A, B, C} = now(),
     random:seed(A, B, C),
-    ClientId = "vmq-pub-" ++ integer_to_list(erlang:phash2({A,B,C})),
     StartAfter = proplists:get_value(start_after, Config, 0),
     Interval = proplists:get_value(interval, Config, 1000),
     Hosts = proplists:get_value(hosts, Config, [{"localhost", 1883}]),
     ConnectOpts = proplists:get_value(connect_opts, Config, []),
+    ClientId = proplists:get_value(client_id, ConnectOpts,
+                                   "vmq-pub-" ++ integer_to_list(erlang:phash2({A,B,C}))),
 
-    Topics = proplists:get_value(topics, Config, [{"/test/topic", 0}]),
+    {Topic, QoS} = proplists:get_value(topic, Config, {"/test/topic", 0}),
     Payload = proplists:get_value(payload, Config, "test-message"),
     PublishOpts = proplists:get_value(publish_opts, Config, []),
     PayloadGenerator =
@@ -86,7 +98,6 @@ init([Config]) ->
                        abs(random:uniform(Max)
                            - random:uniform(Min))) end
     end,
-    {Topic, QoS} = lists:nth(random:uniform(length(Topics)), Topics),
     {Host, Port} = lists:nth(random:uniform(length(Hosts)), Hosts),
 
     case proplists:get_value(stop_after, Config, 0) of
@@ -151,27 +162,29 @@ handle_info(timeout, #state{socket=undefined} = State) ->
            port=Port,
            interval=Interval,
            connect_opts=ConnectOpts} = State,
+    {A,B,C} = now(),
+    random:seed(A, B, C),
 
     Connect = packet:gen_connect(ClientId, ConnectOpts),
     Connack = packet:gen_connack(),
     case packet:do_client_connect(Connect, Connack,
-                                  [{host, Host}, {port, Port}]) of
+                                  [{hostname, Host}, {port, Port}]) of
         {ok, Socket} ->
-            {noreply, State#state{socket=Socket}, Interval};
-        {error, timeout} ->
+            {noreply, State#state{socket=Socket}, Interval + random:uniform(500)};
+        {error, _} ->
             %% we retry in 1 second
             {noreply, State, 1000}
     end;
 handle_info(timeout, #state{socket=Socket} = State) ->
     #state{interval=Interval,
            topic=Topic,
-           payload_generator=Generator,
+           %payload_generator=Generator,
            publish_opts=PublishOpts,
            next_mid=Mid,
            qos=QoS,
            socket=Socket,
            counters=Counters} = State,
-    Payload = term_to_binary({os:timestamp(), Generator()}),
+    Payload = term_to_binary({os:timestamp(), ?SAMPLE_200}),
     Publish = packet:gen_publish(Topic, QoS, Payload,
                                  [{mid, Mid} | PublishOpts]),
     ok = gen_tcp:send(Socket, Publish),
