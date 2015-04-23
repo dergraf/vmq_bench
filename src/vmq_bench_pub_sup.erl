@@ -4,7 +4,8 @@
 
 %% API functions
 -export([start_link/0,
-         start_publishers/1]).
+         start_publishers/1,
+         start_publisher/3]).
 
 %% Supervisor callbacks
 -export([init/1]).
@@ -27,9 +28,16 @@ start_link() ->
     supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
 start_publishers([Config|Rest]) ->
+    Nodes = proplists:get_value(nodes, Config),
     MaxConcurrency = proplists:get_value(max_concurrency, Config, 1),
     Topics = proplists:get_value(topics, Config, []),
-    start_publisher(MaxConcurrency, Topics, lists:keydelete(topics, 1, Config)),
+    case Nodes of
+        undefined ->
+            start_publisher(MaxConcurrency, Topics, lists:keydelete(topics, 1, Config));
+        _ ->
+            [rpc:cast(Node, ?MODULE, start_publisher, [MaxConcurrency, Topics, lists:keydelete(topics, 1, Config)])
+             || Node <- Nodes]
+    end,
     start_publishers(Rest);
 start_publishers([]) -> ok.
 

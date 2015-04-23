@@ -4,7 +4,8 @@
 
 %% API functions
 -export([start_link/0,
-         start_consumers/1]).
+         start_consumers/1,
+         start_consumer/2]).
 
 %% Supervisor callbacks
 -export([init/1]).
@@ -24,8 +25,15 @@ start_link() ->
     supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
 start_consumers([Config|Rest]) ->
+    Nodes = proplists:get_value(nodes, Config),
     MaxConcurrency = proplists:get_value(max_concurrency, Config, 1),
-    start_consumer(MaxConcurrency, Config),
+    case Nodes of
+        undefined ->
+            start_consumer(MaxConcurrency, Config);
+        _ ->
+            io:format("--- spawn consumer on remote nodes ~p~n", [Nodes]),
+            [rpc:cast(Node, ?MODULE, start_consumer, [MaxConcurrency, Config]) || Node <- Nodes]
+    end,
     start_consumers(Rest);
 start_consumers([]) -> ok.
 

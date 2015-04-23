@@ -1,11 +1,10 @@
--module(vmq_bench_stats).
+-module(vmq_bench_stats_collector).
 
 -behaviour(gen_server).
 
 %% API functions
 -export([start_link/0,
-         init_counters/1,
-         incr_counters/4]).
+         collect/2]).
 
 %% gen_server callbacks
 -export([init/1,
@@ -15,10 +14,9 @@
          terminate/2,
          code_change/3]).
 
--record(state, {}).
--define(TBL_PUB, vmq_bench_pub_stats).
--define(TBL_CON, vmq_bench_con_stats).
--define(TBL_LAT, vmq_bench_lat_stats).
+-record(state, {fd}).
+-define(TBL_COLLECT, bench_collect).
+-define(TBL_COLLECT_LATS, bench_collect_lats).
 
 %%%===================================================================
 %%% API functions
@@ -32,66 +30,11 @@
 %% @end
 %%--------------------------------------------------------------------
 start_link() ->
-    gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
+    gen_server:start_link({global, ?MODULE}, ?MODULE, [], []).
 
-init_counters(pub) ->
-    {?TBL_PUB, os:timestamp(), 0, 0, []};
-init_counters(con) ->
-    {?TBL_CON, os:timestamp(), 0, 0, []}.
+collect(TS, Measurement) ->
+    gen_server:cast({global, ?MODULE}, {collect, TS, Measurement}).
 
-incr_counters(MsgIncr, ByteIncr, LatPoint, {Type, {MegaSecs, Secs, _} = TS, MsgCnt, ByteCnt, Lats}) ->
-    case os:timestamp() of
-        {MegaSecs, Secs, _} = Now ->
-            {Type, TS, MsgCnt + MsgIncr, ByteCnt + ByteIncr,
-             add_lats(Now, LatPoint, Lats)};
-        Now ->
-            LastUnixTs = (MegaSecs * 1000000) + Secs,
-            safe_update_counter(Type, LastUnixTs, MsgCnt, ByteCnt, Lats),
-            {Type, Now, MsgIncr, ByteIncr, add_lats(Now, LatPoint, [])}
-    end.
-
-add_lats(TS, {_,_,_} = TS, Lats) ->
-    [0|Lats];
-add_lats({MegaSecs, Secs, MicroSecs}, {MegaSecs, Secs, MMicroSecs}, Lats) ->
-    %% only differ in MicroSecs
-    [abs(MicroSecs - MMicroSecs)|Lats];
-add_lats({MegaSecs, Secs, MicroSecs}, {MegaSecs, SSecs, MMicroSecs}, Lats) ->
-    [abs(((Secs * 1000000) + MicroSecs) -
-         ((SSecs * 1000000) + MMicroSecs))|Lats];
-add_lats({MegaSecs, Secs, MicroSecs}, {MMegaSecs, SSecs, MMicroSecs}, Lats) ->
-    [abs(((MegaSecs * 1000000000) + (Secs * 1000000) + MicroSecs) -
-         ((MMegaSecs * 1000000000) + (SSecs * 1000000) + MMicroSecs))|Lats];
-add_lats(_, _, Lats) -> Lats.
-
-safe_update_counter(Type, TS, MsgCnt, ByteCnt, Lats) ->
-    ets:insert(?TBL_LAT, {TS, calc_lats(Lats)}),
-    safe_update_counter_(Type, TS, MsgCnt, ByteCnt).
-
-safe_update_counter_(Type, TS, MsgCnt, ByteCnt) ->
-    try ets:update_counter(Type, TS, [{2, MsgCnt}, {3, ByteCnt}])
-    catch error:badarg ->
-              case ets:insert_new(Type, {TS, MsgCnt, ByteCnt}) of
-                  true -> ok;
-                  false ->
-                      safe_update_counter_(Type, TS, MsgCnt, ByteCnt)
-              end
-    end.
-
-calc_lats([]) -> {0, 0, 0};
-calc_lats(Lats) ->
-    N = length(Lats),
-    LatAvg = lists:sum(Lats) / N,
-    LatMed = lists:nth((N + 1) div 2, lists:sort(Lats)),
-    LatVar = lists:foldl(fun(V, Acc) ->
-                        Acc + math:pow(V - LatAvg, 2)
-                end, 0, Lats) / N,
-    {LatAvg, LatMed, LatVar}.
-
-
-
-
-
-%%%
 %%%===================================================================
 %%% gen_server callbacks
 %%%===================================================================
@@ -108,11 +51,19 @@ calc_lats(Lats) ->
 %% @end
 %%--------------------------------------------------------------------
 init([]) ->
-    ets:new(?TBL_PUB, [ordered_set, public, named_table, {write_concurrency, true}]),
-    ets:new(?TBL_CON, [ordered_set, public, named_table, {write_concurrency, true}]),
-    ets:new(?TBL_LAT, [public, bag, named_table, {write_concurrency, true}]),
+    ets:new(?TBL_COLLECT, [ordered_set, named_table]),
+    ets:new(?TBL_COLLECT_LATS, [bag, named_table]),
+    {{YY, MM, DD}, {H, M, S}} = calendar:universal_time_to_local_time(
+                                  calendar:universal_time()),
+    FileName = io_lib:format("bench_~p-~p-~p_~p.~p.~p.csv", [YY, MM, DD, H, M, S]),
+    FileNameStr = lists:flatten(FileName),
+    {ok, Fd} = file:open(FileNameStr, [append]),
+    os:cmd("rm current_bench.csv"),
+    os:cmd("ln -s " ++ FileNameStr ++ " current_bench.csv"),
+    Header = io_lib:format("ts,nr_of_pub_msgs,nr_of_pub_data,nr_of_pubs,nr_of_con_msgs,nr_of_con_data,nr_of_cons,avg_latency,median_latency,variance_latency~n", []),
+    file:write(Fd, Header),
     erlang:send_after(1000, self(), dump),
-    {ok, #state{}}.
+    {ok, #state{fd=Fd}}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -142,7 +93,23 @@ handle_call(_Request, _From, State) ->
 %%                                  {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
-handle_cast(_Msg, State) ->
+handle_cast({collect, TS, Measurement}, State) ->
+    {PubMsgCnt, PubByteCnt, NrOfPubs,
+     ConMsgCnt, ConByteCnt, NrOfCons,
+     Lats} = Measurement,
+    try ets:update_counter(?TBL_COLLECT, TS,
+                           [{2, PubMsgCnt},
+                            {3, PubByteCnt},
+                            {4, NrOfPubs},
+                            {5, ConMsgCnt},
+                            {6, ConByteCnt},
+                            {7, NrOfCons}])
+    catch error:badarg ->
+              true = ets:insert_new(?TBL_COLLECT,
+                                    {TS, PubMsgCnt, PubByteCnt, NrOfPubs,
+                                         ConMsgCnt, ConByteCnt, NrOfCons})
+    end,
+    ets:insert(?TBL_COLLECT_LATS, Lats),
     {noreply, State}.
 
 %%--------------------------------------------------------------------
@@ -155,22 +122,39 @@ handle_cast(_Msg, State) ->
 %%                                   {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
-handle_info(dump, State) ->
+handle_info(dump, #state{fd=Fd} = State) ->
     {MegaSecs, Secs, _} = os:timestamp(),
-    OldUnixTs = (MegaSecs * 1000000) + Secs - 5, %% we take 5 second old values
-    {PubMsgCnt, PubByteCnt} = val_or_0(?TBL_PUB, ets:lookup(?TBL_PUB, OldUnixTs)),
-    {ConMsgCnt, ConByteCnt} = val_or_0(?TBL_CON, ets:lookup(?TBL_CON, OldUnixTs)),
-    NrOfPubs = length(supervisor:which_children(vmq_bench_pub_sup)),
-    NrOfCons = length(supervisor:which_children(vmq_bench_con_sup)),
-
-    Lats = ets:lookup(?TBL_LAT, OldUnixTs),
-    ets:delete(?TBL_LAT, OldUnixTs),
-
-    vmq_bench_stats_collector:collect(OldUnixTs,
-                                      {PubMsgCnt, PubByteCnt, NrOfPubs,
-                                       ConMsgCnt, ConByteCnt, NrOfCons,
-                                       Lats}),
-
+    OldUnixTs = (MegaSecs * 1000000) + Secs - 10, %% we take 10 second old values
+    {PubMsgCnt, PubByteCnt, NrOfPubs,
+     ConMsgCnt, ConByteCnt, NrOfCons} = val_or_0(?TBL_COLLECT, ets:lookup(?TBL_COLLECT, OldUnixTs)),
+    Lats = ets:lookup(?TBL_COLLECT_LATS, OldUnixTs),
+    ets:delete(?TBL_COLLECT_LATS, OldUnixTs),
+    {AvgLatency, MedianLatency, VarianceLatency} =
+    case length(Lats) of
+        0 ->
+            {0, 0, 0};
+        M ->
+            {LatAvgSum, LatMedSum, LatVarSum} =
+            lists:foldl(fun({_, {LatAvg, LatMed, LatVar}},
+                            {AccLatAvg, AccLatMed, AccLatVar}) ->
+                                {LatAvg + AccLatAvg,
+                                 LatMed + AccLatMed,
+                                 LatVar + AccLatVar}
+                        end, {0, 0, 0}, Lats),
+            MM = M * 1000,
+            {LatAvgSum / MM, LatMedSum / MM, LatVarSum / MM}
+    end,
+    file:write(Fd, io_lib:format("~p,~p,~p,~p,~p,~p,~p,~p,~p,~p~n", [OldUnixTs,
+                                                      PubMsgCnt,
+                                                      PubByteCnt,
+                                                      NrOfPubs,
+                                                      ConMsgCnt,
+                                                      ConByteCnt,
+                                                      NrOfCons,
+                                                      AvgLatency,
+                                                      MedianLatency,
+                                                      VarianceLatency
+                                                      ])),
     erlang:send_after(1000, self(), dump),
     {noreply, State}.
 
@@ -202,7 +186,7 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
-val_or_0(_, []) -> {0, 0};
-val_or_0(T, [{TS, MsgCnt, ByteCnt}]) ->
+val_or_0(_, []) -> {0, 0, 0, 0, 0, 0};
+val_or_0(T, [{TS, PubMsgCnt, PubByteCnt, NrOfPubs, ConMsgCnt, ConByteCnt, NrOfCons}]) ->
     ets:delete(T, TS),
-    {MsgCnt, ByteCnt}.
+    {PubMsgCnt, PubByteCnt, NrOfPubs, ConMsgCnt, ConByteCnt, NrOfCons}.

@@ -3,7 +3,9 @@
 -behaviour(supervisor).
 
 %% API
--export([start_link/0]).
+-export([start_link/0,
+         add_stats_collector_master/0,
+         add_stats_collector/0]).
 
 %% Supervisor callbacks
 -export([init/1]).
@@ -18,13 +20,19 @@
 start_link() ->
     supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
+add_stats_collector_master() ->
+    supervisor:start_child(?MODULE, ?CHILD(vmq_bench_stats_collector, worker)).
+
+add_stats_collector() ->
+    supervisor:start_child(?MODULE, ?CHILD(vmq_bench_stats, worker)).
+
 %% ===================================================================
 %% Supervisor callbacks
 %% ===================================================================
 
 init([]) ->
     {ok, { {one_for_one, 5, 10},
-           [?CHILD(vmq_bench_stats, worker),
+           [
             ?CHILD(vmq_bench_pub_sup, supervisor),
             ?CHILD(vmq_bench_con_sup, supervisor)]}}.
 
