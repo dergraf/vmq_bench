@@ -5,7 +5,7 @@
 %% API functions
 -export([start_link/0,
          start_publishers/1,
-         start_publisher/3]).
+         start_publisher/4]).
 
 %% Supervisor callbacks
 -export([init/1]).
@@ -28,24 +28,28 @@ start_link() ->
     supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
 start_publishers([Config|Rest]) ->
-    Nodes = proplists:get_value(nodes, Config),
-    MaxConcurrency = proplists:get_value(max_concurrency, Config, 1),
-    Topics = proplists:get_value(topics, Config, []),
-    case Nodes of
-        undefined ->
-            start_publisher(MaxConcurrency, Topics, lists:keydelete(topics, 1, Config));
-        _ ->
-            [rpc:cast(Node, ?MODULE, start_publisher, [MaxConcurrency, Topics, lists:keydelete(topics, 1, Config)])
-             || Node <- Nodes]
-    end,
+    spawn(
+      fun() ->
+              Nodes = proplists:get_value(nodes, Config),
+              MaxConcurrency = proplists:get_value(max_concurrency, Config, 1),
+              Topics = proplists:get_value(topics, Config, []),
+              Sleep = proplists:get_value(setup_every, Config, 10),
+              case Nodes of
+                  undefined ->
+                      start_publisher(MaxConcurrency, Topics, Sleep, lists:keydelete(topics, 1, Config));
+                  _ ->
+                      [rpc:cast(Node, ?MODULE, start_publisher, [MaxConcurrency, Topics, Sleep, lists:keydelete(topics, 1, Config)])
+                       || Node <- Nodes]
+              end
+      end),
     start_publishers(Rest);
 start_publishers([]) -> ok.
 
-start_publisher(0, _, _) -> ok;
-start_publisher(N, [T|Topics], Config) ->
+start_publisher(0, _, _, _) -> ok;
+start_publisher(N, [T|Topics], Sleep, Config) ->
     {ok, _} = supervisor:start_child(?MODULE, [[{topic, T}|Config]]),
-    timer:sleep(10),
-    start_publisher(N - 1, Topics ++ [T], Config).
+    timer:sleep(Sleep),
+    start_publisher(N - 1, Topics ++ [T], Sleep, Config).
 
 
 %%%===================================================================
