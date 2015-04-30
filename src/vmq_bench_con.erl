@@ -139,7 +139,7 @@ handle_info(timeout, #state{socket=undefined} = State) ->
     ok = gen_tcp:send(Socket, Subscribe),
     Suback = packet:gen_suback(1, QoS),
     ok = packet:expect_packet(Socket, "suback", Suback),
-    ok = inet:setopts(Socket, [{active, true}]),
+    inet:setopts(Socket, [{active, once}]),
     {noreply, State#state{socket=Socket}};
 handle_info(ping, #state{socket=Socket, keepalive=Keepalive} = State) ->
     case Socket of
@@ -150,9 +150,14 @@ handle_info(ping, #state{socket=Socket, keepalive=Keepalive} = State) ->
     erlang:send_after(Keepalive  * 1000, self(), ping),
     {noreply, State};
 handle_info({tcp, Socket, Data}, #state{socket=Socket, parser_state=PS,
-                                        counters=Counters} = State) ->
+                                        topic=Topic, counters=Counters} = State) ->
     {NewPS, NewCounters} = process_bytes(PS, Data, Socket, Counters),
-    %inet:setopts(Socket, [{active, once}]),
+    case Topic of
+        "long/lat" -> timer:sleep(500);
+        _ -> ok
+    end,
+
+    inet:setopts(Socket, [{active, once}]),
     {noreply, State#state{parser_state=NewPS, counters=NewCounters}};
 handle_info({tcp_closed, Socket}, #state{socket=Socket} = State) ->
     {stop, normal, State};

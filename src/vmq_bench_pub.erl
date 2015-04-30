@@ -21,6 +21,7 @@
                 connect_opts,
                 publish_opts,
                 payload_generator,
+                stuff_frame_size,
                 retain,
                 topic,
                 qos,
@@ -73,6 +74,7 @@ init([Config]) ->
     {Topic, QoS} = proplists:get_value(topic, Config, {"/test/topic", 0}),
     Payload = proplists:get_value(payload, Config, "test-message"),
     PublishOpts = proplists:get_value(publish_opts, Config, []),
+    FrameSize = proplists:get_value(stuff_frame_size, Config),
     PayloadGenerator =
     case {lists:keyfind(max, 1, Payload),
           lists:keyfind(min, 1, Payload)} of
@@ -104,6 +106,7 @@ init([Config]) ->
                 connect_opts=ConnectOpts,
                 publish_opts=PublishOpts,
                 payload_generator=PayloadGenerator,
+                stuff_frame_size=FrameSize,
                 topic=Topic,
                 qos=QoS,
                 interval=Interval}, StartAfter}.
@@ -175,37 +178,67 @@ handle_info(timeout, #state{socket=Socket} = State) ->
            topic=Topic,
            payload_generator=Generator,
            publish_opts=PublishOpts,
+           stuff_frame_size=FrameSize,
            next_mid=Mid,
            qos=QoS,
            socket=Socket,
            counters=Counters} = State,
-    Payload = term_to_binary({os:timestamp(), Generator()}),
-    Publish = packet:gen_publish(Topic, QoS, Payload,
-                                 [{mid, Mid} | PublishOpts]),
-    ok = gen_tcp:send(Socket, Publish),
-    L = byte_size(Publish),
-    NewCounters =
-    case QoS of
-        0 ->
-            vmq_bench_stats:incr_counters(1, L, nil, Counters);
-        1 ->
-            Puback = packet:gen_puback(Mid),
-            ok = packet:expect_packet(Socket, "puback", Puback),
-            vmq_bench_stats:incr_counters(1, L + byte_size(Puback), nil, Counters);
-        2 ->
-            Pubrec = packet:gen_pubrec(Mid),
-            ok = packet:expect_packet(Socket, "pubrec", Pubrec),
-            Pubrel = packet:gen_pubrel(Mid),
-            ok = gen_tcp:send(Socket, Pubrel),
-            Pubcomp = packet:gen_pubcomp(Mid),
-            ok = packet:expect_packet(Socket, "pubcomp", Pubcomp),
-            vmq_bench_stats:incr_counters(1, L + byte_size(Pubrel), nil, Counters)
-    end,
-    {noreply, State#state{next_mid=next_mid(Mid),
+    {NextMid, Mids, Frame} = stuff_the_frame(FrameSize, Topic, QoS,
+                                             Mid, Generator, PublishOpts),
+
+    ok = gen_tcp:send(Socket, Frame),
+    L = iolist_size(Frame),
+    NewCounters = await_acks(Socket, QoS, Mids, L, Counters),
+    {noreply, State#state{next_mid=NextMid,
                           counters=NewCounters}, Interval};
 
 handle_info(stop_now, State) ->
     {stop, normal, State}.
+
+stuff_the_frame(undefined, Topic, QoS, Mid, Generator, PublishOpts) ->
+    %% we dont stuff
+    Payload = term_to_binary({os:timestamp(), Generator()}),
+    Publish = packet:gen_publish(Topic, QoS, Payload,
+                                 [{mid, Mid} | PublishOpts]),
+    {next_mid(Mid), [Mid], Publish};
+stuff_the_frame(FrameSize, Topic, QoS, Mid, Generator, PublishOpts) ->
+    stuff_the_frame(FrameSize, Topic, QoS, Mid, Generator, PublishOpts, [], []).
+
+stuff_the_frame(FrameSize, Topic, QoS, Mid, Generator, PublishOpts, Mids, Buf) ->
+    Payload = term_to_binary({os:timestamp(), Generator()}),
+    Publish = packet:gen_publish(Topic, QoS, Payload,
+                                 [{mid, Mid} | PublishOpts]),
+    NewBuf = [Publish|Buf],
+    case iolist_size(NewBuf) of
+        S when S < FrameSize ->
+            stuff_the_frame(FrameSize, Topic, QoS, next_mid(Mid), Generator,
+                            PublishOpts, [Mid|Mids], NewBuf);
+        _ ->
+            {Mid, lists:reverse(Mids), lists:reverse(Buf)}
+    end.
+
+await_acks(_, 0, Mids, L, Counters) ->
+    vmq_bench_stats:incr_counters(length(Mids), L, nil, Counters);
+await_acks(Socket, 1, [Mid|Mids], L, Counters) ->
+    Puback = packet:gen_puback(Mid),
+    ok = packet:expect_packet(Socket, "puback", Puback),
+    vmq_bench_stats:incr_counters(1, byte_size(Puback), nil, Counters),
+    await_acks(Socket, 1, Mids, L, Counters);
+await_acks(_, 1, [], L, Counters) ->
+    vmq_bench_stats:incr_counters(0, L, nil, Counters);
+await_acks(Socket, 2, [Mid|Mids], L, Counters) ->
+    Pubrec = packet:gen_pubrec(Mid),
+    ok = packet:expect_packet(Socket, "pubrec", Pubrec),
+    Pubrel = packet:gen_pubrel(Mid),
+    ok = gen_tcp:send(Socket, Pubrel),
+    Pubcomp = packet:gen_pubcomp(Mid),
+    ok = packet:expect_packet(Socket, "pubcomp", Pubcomp),
+    vmq_bench_stats:incr_counters(1, byte_size(Pubrel), nil, Counters),
+    await_acks(Socket, 2, Mids, L, Counters);
+await_acks(_, 2, [], L, Counters) ->
+    vmq_bench_stats:incr_counters(0, L, nil, Counters).
+
+
 
 %%--------------------------------------------------------------------
 %% @private

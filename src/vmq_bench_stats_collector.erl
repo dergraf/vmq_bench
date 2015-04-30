@@ -52,7 +52,7 @@ collect(TS, Measurement) ->
 %%--------------------------------------------------------------------
 init([]) ->
     ets:new(?TBL_COLLECT, [ordered_set, named_table]),
-    ets:new(?TBL_COLLECT_LATS, [bag, named_table]),
+    ets:new(?TBL_COLLECT_LATS, [bag, public, named_table]),
     {{YY, MM, DD}, {H, M, S}} = calendar:universal_time_to_local_time(
                                   calendar:universal_time()),
     FileName = io_lib:format("bench_~p-~p-~p_~p.~p.~p.csv", [YY, MM, DD, H, M, S]),
