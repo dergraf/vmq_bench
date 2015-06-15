@@ -21,11 +21,11 @@
                 connect_opts,
                 publish_opts,
                 payload_generator,
-                stuff_frame_size,
                 retain,
                 topic,
                 qos,
                 interval,
+                msgs_per_step,
                 next_mid=1,
                 counters=vmq_bench_stats:init_counters(pub)}).
 
@@ -66,6 +66,7 @@ init([Config]) ->
     random:seed(A, B, C),
     StartAfter = proplists:get_value(start_after, Config, 0),
     Interval = proplists:get_value(interval, Config, 1000),
+    MsgsPerStep = proplists:get_value(msgs_per_step, Config, 1),
     Hosts = proplists:get_value(hosts, Config, [{"localhost", 1883}]),
     ConnectOpts = proplists:get_value(connect_opts, Config, []),
     ClientId = proplists:get_value(client_id, ConnectOpts,
@@ -74,7 +75,6 @@ init([Config]) ->
     {Topic, QoS} = proplists:get_value(topic, Config, {"/test/topic", 0}),
     Payload = proplists:get_value(payload, Config, "test-message"),
     PublishOpts = proplists:get_value(publish_opts, Config, []),
-    FrameSize = proplists:get_value(stuff_frame_size, Config),
     PayloadGenerator =
     case {lists:keyfind(max, 1, Payload),
           lists:keyfind(min, 1, Payload)} of
@@ -106,10 +106,10 @@ init([Config]) ->
                 connect_opts=ConnectOpts,
                 publish_opts=PublishOpts,
                 payload_generator=PayloadGenerator,
-                stuff_frame_size=FrameSize,
                 topic=Topic,
                 qos=QoS,
-                interval=Interval}, StartAfter}.
+                interval=Interval,
+                msgs_per_step=MsgsPerStep}, StartAfter}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -178,12 +178,12 @@ handle_info(timeout, #state{socket=Socket} = State) ->
            topic=Topic,
            payload_generator=Generator,
            publish_opts=PublishOpts,
-           stuff_frame_size=FrameSize,
+           msgs_per_step=MsgsPerStep,
            next_mid=Mid,
            qos=QoS,
            socket=Socket,
            counters=Counters} = State,
-    {NextMid, Mids, Frame} = stuff_the_frame(FrameSize, Topic, QoS,
+    {NextMid, Mids, Frame} = stuff_the_frame(MsgsPerStep, Topic, QoS,
                                              Mid, Generator, PublishOpts),
 
     ok = gen_tcp:send(Socket, Frame),
@@ -195,27 +195,18 @@ handle_info(timeout, #state{socket=Socket} = State) ->
 handle_info(stop_now, State) ->
     {stop, normal, State}.
 
-stuff_the_frame(undefined, Topic, QoS, Mid, Generator, PublishOpts) ->
-    %% we dont stuff
-    Payload = term_to_binary({os:timestamp(), Generator()}),
-    Publish = packet:gen_publish(Topic, QoS, Payload,
-                                 [{mid, Mid} | PublishOpts]),
-    {next_mid(Mid), [Mid], Publish};
-stuff_the_frame(FrameSize, Topic, QoS, Mid, Generator, PublishOpts) ->
-    stuff_the_frame(FrameSize, Topic, QoS, Mid, Generator, PublishOpts, [], []).
+stuff_the_frame(MsgsPerStep, Topic, QoS, Mid, Generator, PublishOpts) ->
+    stuff_the_frame(MsgsPerStep, Topic, QoS, Mid, Generator, PublishOpts, [], []).
 
-stuff_the_frame(FrameSize, Topic, QoS, Mid, Generator, PublishOpts, Mids, Buf) ->
+stuff_the_frame(0, _, _, Mid, _, _, Mids, Buf) ->
+    {Mid, lists:reverse(Mids), lists:reverse(Buf)};
+stuff_the_frame(MsgsPerStep, Topic, QoS, Mid, Generator, PublishOpts, Mids, Buf) ->
     Payload = term_to_binary({os:timestamp(), Generator()}),
     Publish = packet:gen_publish(Topic, QoS, Payload,
                                  [{mid, Mid} | PublishOpts]),
     NewBuf = [Publish|Buf],
-    case iolist_size(NewBuf) of
-        S when S < FrameSize ->
-            stuff_the_frame(FrameSize, Topic, QoS, next_mid(Mid), Generator,
-                            PublishOpts, [Mid|Mids], NewBuf);
-        _ ->
-            {Mid, lists:reverse(Mids), lists:reverse(Buf)}
-    end.
+    stuff_the_frame(MsgsPerStep - 1, Topic, QoS, next_mid(Mid), Generator,
+                    PublishOpts, [Mid|Mids], NewBuf).
 
 await_acks(_, 0, Mids, L, Counters) ->
     vmq_bench_stats:incr_counters(length(Mids), L, nil, Counters);
