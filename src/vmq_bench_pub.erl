@@ -72,7 +72,12 @@ init([Config]) ->
     ClientId = proplists:get_value(client_id, ConnectOpts,
                                    "vmq-pub-" ++ integer_to_list(erlang:phash2({A,B,C}))),
 
-    {Topic, QoS} = proplists:get_value(topic, Config, {"/test/topic", 0}),
+    {Topic, QoS} =
+    case proplists:get_value(topic, Config, {"/test/topic", 0}) of
+        {{Prefix, client_id}, TQoS} ->
+            {Prefix ++ ClientId, TQoS};
+        V -> V
+    end,
     Payload = proplists:get_value(payload, Config, "test-message"),
     PublishOpts = proplists:get_value(publish_opts, Config, []),
     PayloadGenerator =
