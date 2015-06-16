@@ -77,16 +77,26 @@ safe_update_counter_(Type, TS, MsgCnt, ByteCnt) ->
               end
     end.
 
-calc_lats([]) -> {0, 0, 0};
+calc_lats([]) -> {0, 0, 0, 0, 0, 0, 0, 0, 0};
 calc_lats(Lats) ->
     N = length(Lats),
     LatAvg = lists:sum(Lats) / N,
     LatMed = lists:nth((N + 1) div 2, lists:sort(Lats)),
-    LatVar = lists:foldl(fun(V, Acc) ->
+    LatVar = math:sqrt(lists:foldl(fun(V, Acc) ->
                         Acc + math:pow(V - LatAvg, 2)
-                end, 0, Lats) / N,
-    {LatAvg, LatMed, LatVar}.
+                end, 0, Lats) / N),
+    list_to_tuple([LatAvg, LatMed, LatVar | percentiles(Lats)]).
 
+
+percentiles(Lats) ->
+    Len = length(Lats),
+    Sorted = lists:sort(Lats),
+    [percentile(Sorted, Len, Perc) ||
+     Perc <- [0.50, 0.75, 0.90, 0.95, 0.99, 0.999]].
+
+percentile(List, Size, Perc) ->
+    Element = round(Perc * Size),
+    lists:nth(Element, List).
 
 
 

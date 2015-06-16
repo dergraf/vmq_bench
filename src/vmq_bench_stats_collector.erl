@@ -55,13 +55,16 @@ init([]) ->
     ets:new(?TBL_COLLECT_LATS, [bag, public, named_table]),
     {{YY, MM, DD}, {H, M, S}} = calendar:universal_time_to_local_time(
                                   calendar:universal_time()),
-    FileName = io_lib:format("bench_~p-~p-~p_~p.~p.~p.csv", [YY, MM, DD, H, M, S]),
-    FileNameStr = lists:flatten(FileName),
+    FolderName = io_lib:format("bench_~p-~p-~p_~p.~p.~p", [YY, MM, DD, H, M, S]),
+    os:cmd("mkdir " ++ FolderName),
+    os:cmd("rm current_bench"),
+    os:cmd("ln -s " ++ FolderName ++ " current_bench"),
+    FileNameStr = filename:join(FolderName, "bench.csv"),
     {ok, Fd} = file:open(FileNameStr, [append]),
-    os:cmd("rm current_bench.csv"),
-    os:cmd("ln -s " ++ FileNameStr ++ " current_bench.csv"),
-    Header = io_lib:format("ts,nr_of_pub_msgs,nr_of_pub_data,nr_of_pubs,nr_of_con_msgs,nr_of_con_data,nr_of_cons,avg_latency,median_latency,variance_latency~n", []),
+    Header = io_lib:format("ts,nr_of_pub_msgs,nr_of_pub_data,nr_of_pubs,nr_of_con_msgs,nr_of_con_data,nr_of_cons,avg_latency,median_latency,variance_latency,lat_50,lat_75,lat_90,lat_95,lat_99,lat_999~n", []),
     file:write(Fd, Header),
+    {ok, [[ScenarioFile]]} = init:get_argument(scenario),
+    os:cmd("cp " ++ ScenarioFile ++ " current_bench/bench.scenario"),
     erlang:send_after(1000, self(), dump),
     {ok, #state{fd=Fd}}.
 
@@ -129,32 +132,35 @@ handle_info(dump, #state{fd=Fd} = State) ->
      ConMsgCnt, ConByteCnt, NrOfCons} = val_or_0(?TBL_COLLECT, ets:lookup(?TBL_COLLECT, OldUnixTs)),
     Lats = ets:lookup(?TBL_COLLECT_LATS, OldUnixTs),
     ets:delete(?TBL_COLLECT_LATS, OldUnixTs),
-    {AvgLatency, MedianLatency, VarianceLatency} =
+    %         Avg    Median  StdVar  50-perc 75-perc 90-perc 95-perc 99-perc 999-perc
+    InitAcc = [0,       0,      0,      0,      0,      0,      0,      0,      0],
+    AvgLats =
     case length(Lats) of
         0 ->
-            {0, 0, 0};
+            InitAcc;
         M ->
-            {LatAvgSum, LatMedSum, LatVarSum} =
-            lists:foldl(fun({_, {LatAvg, LatMed, LatVar}},
-                            {AccLatAvg, AccLatMed, AccLatVar}) ->
-                                {LatAvg + AccLatAvg,
-                                 LatMed + AccLatMed,
-                                 LatVar + AccLatVar}
-                        end, {0, 0, 0}, Lats),
+            LatSums =
+            lists:foldl(fun({_, LatVals}, AccLatVals) when size(LatVals) == length(AccLatVals) ->
+                                T = lists:foldl(fun(I, Acc) ->
+                                                        Sum =  element(I, LatVals)
+                                                        + lists:nth(I, AccLatVals),
+                                                        [Sum|Acc]
+                                                end, [], lists:seq(1, size(LatVals))),
+                                lists:reverse(T)
+                        end, InitAcc, Lats),
             MM = M * 1000,
-            {LatAvgSum / MM, LatMedSum / MM, LatVarSum / MM}
+            lists:reverse(lists:foldl(fun(LatSum, Acc) ->
+                                              [trunc(LatSum / MM)|Acc]
+                                      end, [], LatSums))
     end,
-    file:write(Fd, io_lib:format("~p,~p,~p,~p,~p,~p,~p,~p,~p,~p~n", [OldUnixTs,
-                                                      PubMsgCnt,
-                                                      PubByteCnt,
-                                                      NrOfPubs,
-                                                      ConMsgCnt,
-                                                      ConByteCnt,
-                                                      NrOfCons,
-                                                      AvgLatency,
-                                                      MedianLatency,
-                                                      VarianceLatency
-                                                      ])),
+    file:write(Fd, io_lib:format("~p,~p,~p,~p,~p,~p,~p,~p,~p,~p,~p,~p,~p,~p,~p,~p~n",
+                                 [OldUnixTs,
+                                  PubMsgCnt,
+                                  PubByteCnt,
+                                  NrOfPubs,
+                                  ConMsgCnt,
+                                  ConByteCnt,
+                                  NrOfCons | AvgLats])),
     erlang:send_after(1000, self(), dump),
     {noreply, State}.
 
