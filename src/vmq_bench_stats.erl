@@ -166,17 +166,15 @@ handle_cast(_Msg, State) ->
 %% @end
 %%--------------------------------------------------------------------
 handle_info(dump, State) ->
-    {MegaSecs, Secs, _} = os:timestamp(),
-    OldUnixTs = (MegaSecs * 1000000) + Secs - 5, %% we take 5 second old values
-    {PubMsgCnt, PubByteCnt} = val_or_0(?TBL_PUB, ets:lookup(?TBL_PUB, OldUnixTs)),
-    {ConMsgCnt, ConByteCnt} = val_or_0(?TBL_CON, ets:lookup(?TBL_CON, OldUnixTs)),
+    {_, PubMsgCnt, PubByteCnt} = val_or_0(?TBL_PUB, ets:first(?TBL_PUB)),
+    {TS, ConMsgCnt, ConByteCnt} = val_or_0(?TBL_CON, ets:first(?TBL_CON)),
     NrOfPubs = length(supervisor:which_children(vmq_bench_pub_sup)),
     NrOfCons = length(supervisor:which_children(vmq_bench_con_sup)),
 
-    Lats = ets:lookup(?TBL_LAT, OldUnixTs),
-    ets:delete(?TBL_LAT, OldUnixTs),
+    Lats = ets:lookup(?TBL_LAT, TS),
+    ets:delete(?TBL_LAT, TS),
 
-    vmq_bench_stats_collector:collect(OldUnixTs,
+    vmq_bench_stats_collector:collect(TS,
                                       {PubMsgCnt, PubByteCnt, NrOfPubs,
                                        ConMsgCnt, ConByteCnt, NrOfCons,
                                        Lats}),
@@ -212,7 +210,11 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
-val_or_0(_, []) -> {0, 0};
-val_or_0(T, [{TS, MsgCnt, ByteCnt}]) ->
+val_or_0(_, '$end_of_table') ->
+    {MegaSecs, Secs, _} = os:timestamp(),
+    Ts = (MegaSecs * 1000000) + Secs,
+    {Ts, 0, 0};
+val_or_0(T, TS) ->
+    [{TS, MsgCnt, ByteCnt}] = ets:lookup(T, TS),
     ets:delete(T, TS),
-    {MsgCnt, ByteCnt}.
+    {TS, MsgCnt, ByteCnt}.
