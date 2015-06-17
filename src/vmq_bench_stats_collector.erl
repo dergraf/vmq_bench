@@ -126,12 +126,11 @@ handle_cast({collect, TS, Measurement}, State) ->
 %% @end
 %%--------------------------------------------------------------------
 handle_info(dump, #state{fd=Fd} = State) ->
-    {MegaSecs, Secs, _} = os:timestamp(),
-    OldUnixTs = (MegaSecs * 1000000) + Secs - 10, %% we take 10 second old values
-    {PubMsgCnt, PubByteCnt, NrOfPubs,
-     ConMsgCnt, ConByteCnt, NrOfCons} = val_or_0(?TBL_COLLECT, ets:lookup(?TBL_COLLECT, OldUnixTs)),
-    Lats = ets:lookup(?TBL_COLLECT_LATS, OldUnixTs),
-    ets:delete(?TBL_COLLECT_LATS, OldUnixTs),
+
+    {TS, PubMsgCnt, PubByteCnt, NrOfPubs,
+     ConMsgCnt, ConByteCnt, NrOfCons} = val_or_0(?TBL_COLLECT, ets:first(?TBL_COLLECT)),
+    Lats = ets:lookup(?TBL_COLLECT_LATS, TS),
+    ets:delete(?TBL_COLLECT_LATS, TS),
     %         Avg    Median  StdVar  50-perc 75-perc 90-perc 95-perc 99-perc 999-perc
     InitAcc = [0,       0,      0,      0,      0,      0,      0,      0,      0],
     AvgLats =
@@ -154,7 +153,7 @@ handle_info(dump, #state{fd=Fd} = State) ->
                                       end, [], LatSums))
     end,
     file:write(Fd, io_lib:format("~p,~p,~p,~p,~p,~p,~p,~p,~p,~p,~p,~p,~p,~p,~p,~p~n",
-                                 [OldUnixTs,
+                                 [TS,
                                   PubMsgCnt,
                                   PubByteCnt,
                                   NrOfPubs,
@@ -192,7 +191,11 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
-val_or_0(_, []) -> {0, 0, 0, 0, 0, 0};
-val_or_0(T, [{TS, PubMsgCnt, PubByteCnt, NrOfPubs, ConMsgCnt, ConByteCnt, NrOfCons}]) ->
+val_or_0(_, '$end_of_table') ->
+    {MegaSecs, Secs, _} = os:timestamp(),
+    TS = (MegaSecs * 1000000) + Secs,
+    {TS, 0, 0, 0, 0, 0, 0};
+val_or_0(T, TS) ->
+    [Ret|_] = ets:lookup(T, TS),
     ets:delete(T, TS),
-    {PubMsgCnt, PubByteCnt, NrOfPubs, ConMsgCnt, ConByteCnt, NrOfCons}.
+    Ret.
