@@ -70,7 +70,7 @@ start_publisher(N, [T|Topics], Sleep, Config) ->
 %% @end
 %%--------------------------------------------------------------------
 init([]) ->
-    {ok, {{simple_one_for_one, 5, 10},
+    {ok, {{simple_one_for_one, 50, 1},
           [{vmq_bench_pub, {vmq_bench_pub, start_link, []},
                             permanent, 5000, worker, [vmq_bench_pub]}]}}.
 
