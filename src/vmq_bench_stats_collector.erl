@@ -97,10 +97,13 @@ handle_call(_Request, _From, State) ->
 %% @end
 %%--------------------------------------------------------------------
 handle_cast({collect, TS, Measurement}, State) ->
+    {MegaSecs, Secs, _} = TS,
+    UnixTS = (MegaSecs * 1000000) + Secs,
+
     {PubMsgCnt, PubByteCnt, NrOfPubs,
      ConMsgCnt, ConByteCnt, NrOfCons,
      Lats} = Measurement,
-    try ets:update_counter(?TBL_COLLECT, TS,
+    try ets:update_counter(?TBL_COLLECT, UnixTS,
                            [{2, PubMsgCnt},
                             {3, PubByteCnt},
                             {4, NrOfPubs},
@@ -109,10 +112,10 @@ handle_cast({collect, TS, Measurement}, State) ->
                             {7, NrOfCons}])
     catch error:badarg ->
               true = ets:insert_new(?TBL_COLLECT,
-                                    {TS, PubMsgCnt, PubByteCnt, NrOfPubs,
+                                    {UnixTS, PubMsgCnt, PubByteCnt, NrOfPubs,
                                          ConMsgCnt, ConByteCnt, NrOfCons})
     end,
-    ets:insert(?TBL_COLLECT_LATS, Lats),
+    ets:insert(?TBL_COLLECT_LATS, [{UnixTS, L}|| {_, L} <- Lats]),
     {noreply, State}.
 
 %%--------------------------------------------------------------------

@@ -45,8 +45,7 @@ incr_counters(MsgIncr, ByteIncr, LatPoint, {Type, {MegaSecs, Secs, _} = TS, MsgC
             {Type, TS, MsgCnt + MsgIncr, ByteCnt + ByteIncr,
              add_lats(Now, LatPoint, Lats)};
         Now ->
-            LastUnixTs = (MegaSecs * 1000000) + Secs,
-            safe_update_counter(Type, LastUnixTs, MsgCnt, ByteCnt, Lats),
+            safe_update_counter(Type, MsgCnt, ByteCnt, Lats),
             {Type, Now, MsgIncr, ByteIncr, add_lats(Now, LatPoint, [])}
     end.
 
@@ -63,17 +62,17 @@ add_lats({MegaSecs, Secs, MicroSecs}, {MMegaSecs, SSecs, MMicroSecs}, Lats) ->
          ((MMegaSecs * 1000000000) + (SSecs * 1000000) + MMicroSecs))|Lats];
 add_lats(_, _, Lats) -> Lats.
 
-safe_update_counter(Type, TS, MsgCnt, ByteCnt, Lats) ->
-    ets:insert(?TBL_LAT, {TS, calc_lats(Lats)}),
-    safe_update_counter_(Type, TS, MsgCnt, ByteCnt).
+safe_update_counter(Type, MsgCnt, ByteCnt, Lats) ->
+    ets:insert(?TBL_LAT, {lat, calc_lats(Lats)}),
+    safe_update_counter_(Type, MsgCnt, ByteCnt).
 
-safe_update_counter_(Type, TS, MsgCnt, ByteCnt) ->
-    try ets:update_counter(Type, TS, [{2, MsgCnt}, {3, ByteCnt}])
+safe_update_counter_(Type, MsgCnt, ByteCnt) ->
+    try ets:update_counter(Type, cnt, [{2, MsgCnt}, {3, ByteCnt}])
     catch error:badarg ->
-              case ets:insert_new(Type, {TS, MsgCnt, ByteCnt}) of
+              case ets:insert_new(Type, {cnt, MsgCnt, ByteCnt}) of
                   true -> ok;
                   false ->
-                      safe_update_counter_(Type, TS, MsgCnt, ByteCnt)
+                      safe_update_counter_(Type, MsgCnt, ByteCnt)
               end
     end.
 
@@ -167,14 +166,14 @@ handle_cast(_Msg, State) ->
 %%--------------------------------------------------------------------
 handle_info(dump, State) ->
     {_, PubMsgCnt, PubByteCnt} = val_or_0(?TBL_PUB, ets:first(?TBL_PUB)),
-    {TS, ConMsgCnt, ConByteCnt} = val_or_0(?TBL_CON, ets:first(?TBL_CON)),
+    {_, ConMsgCnt, ConByteCnt} = val_or_0(?TBL_CON, ets:first(?TBL_CON)),
     NrOfPubs = length(supervisor:which_children(vmq_bench_pub_sup)),
     NrOfCons = length(supervisor:which_children(vmq_bench_con_sup)),
 
-    Lats = ets:lookup(?TBL_LAT, TS),
-    ets:delete(?TBL_LAT, TS),
+    Lats = ets:lookup(?TBL_LAT, lat),
+    ets:delete(?TBL_LAT, lat),
 
-    vmq_bench_stats_collector:collect(TS,
+    vmq_bench_stats_collector:collect(os:timestamp(),
                                       {PubMsgCnt, PubByteCnt, NrOfPubs,
                                        ConMsgCnt, ConByteCnt, NrOfCons,
                                        Lats}),
