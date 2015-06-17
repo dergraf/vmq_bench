@@ -191,11 +191,17 @@ handle_info(timeout, #state{socket=Socket} = State) ->
     {NextMid, Mids, Frame} = stuff_the_frame(MsgsPerStep, Topic, QoS,
                                              Mid, Generator, PublishOpts),
 
-    ok = gen_tcp:send(Socket, Frame),
-    L = iolist_size(Frame),
-    NewCounters = await_acks(Socket, QoS, Mids, L, Counters),
-    {noreply, State#state{next_mid=NextMid,
-                          counters=NewCounters}, Interval};
+    case gen_tcp:send(Socket, Frame) of
+        ok ->
+            L = iolist_size(Frame),
+            NewCounters = await_acks(Socket, QoS, Mids, L, Counters),
+            {noreply, State#state{next_mid=NextMid,
+                                  counters=NewCounters}, Interval};
+        {error, closed} ->
+            {noreply, State#state{socket=undefined,
+                                  next_mid=1,
+                                  counters=vmq_bench_stats:init_counters(pub)}, 1000}
+    end;
 
 handle_info(stop_now, State) ->
     {stop, normal, State}.
