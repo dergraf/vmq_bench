@@ -173,6 +173,7 @@ handle_info(timeout, #state{socket=undefined} = State) ->
     case packet:do_client_connect(Connect, Connack,
                                   [{hostname, Host}, {port, Port}]) of
         {ok, Socket} ->
+            folsom_metrics:notify({nr_of_publishers, {inc, 1}}),
             {noreply, State#state{socket=Socket}, Interval + random:uniform(500)};
         {error, _} ->
             %% we retry in 1 second
@@ -198,12 +199,14 @@ handle_info(timeout, #state{socket=Socket} = State) ->
             {noreply, State#state{next_mid=NextMid,
                                   counters=NewCounters}, Interval};
         {error, closed} ->
+            folsom_metrics:notify({nr_of_publishers, {dec, 1}}),
             {noreply, State#state{socket=undefined,
                                   next_mid=1,
                                   counters=vmq_bench_stats:init_counters(pub)}, 1000}
     end;
 
 handle_info(stop_now, State) ->
+    folsom_metrics:notify({nr_of_publishers, {dec, 1}}),
     {stop, normal, State}.
 
 stuff_the_frame(MsgsPerStep, Topic, QoS, Mid, Generator, PublishOpts) ->

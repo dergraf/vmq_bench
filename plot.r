@@ -38,7 +38,6 @@ plot5 <- bench_plot + labs(title = "Latencies in ms") +
             geom_line(aes(y = median_latency, color = "median"), size=0.5) +
             geom_line(aes(y = lat_50, color = "50%"), size=0.5) +
             geom_line(aes(y = lat_75, color = "75%"), size=0.5) +
-            geom_line(aes(y = lat_90, color = "90%"), size=0.5) +
             geom_line(aes(y = lat_95, color = "95%"), size=0.5) +
             geom_line(aes(y = lat_99, color = "99%"), size=0.5) +
             geom_line(aes(y = lat_999, color = "99.9%"), size=0.5) +

@@ -135,6 +135,7 @@ handle_info(timeout, #state{socket=undefined} = State) ->
     Connack = packet:gen_connack(),
     {ok, Socket} = packet:do_client_connect(Connect, Connack,
                                             [{hostname, Host}, {port, Port}]),
+    folsom_metrics:notify({nr_of_consumers, {inc, 1}}),
     Subscribe = packet:gen_subscribe(1, Topic, QoS),
     ok = gen_tcp:send(Socket, Subscribe),
     Suback = packet:gen_suback(1, QoS),
@@ -160,8 +161,10 @@ handle_info({tcp, Socket, Data}, #state{socket=Socket, parser_state=PS,
     inet:setopts(Socket, [{active, once}]),
     {noreply, State#state{parser_state=NewPS, counters=NewCounters}};
 handle_info({tcp_closed, Socket}, #state{socket=Socket} = State) ->
+    folsom_metrics:notify({nr_of_consumers, {dec, 1}}),
     {stop, normal, State};
 handle_info(stop_now, State) ->
+    folsom_metrics:notify({nr_of_consumers, {dec, 1}}),
     {stop, normal, State}.
 
 %%--------------------------------------------------------------------

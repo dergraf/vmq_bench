@@ -20,7 +20,22 @@
 
 
 start() ->
+
     application:ensure_all_started(vmq_bench),
+    folsom_metrics:new_counter(published_msgs),
+    folsom_metrics:new_counter(published_bytes),
+    folsom_metrics:new_counter(consumed_msgs),
+    folsom_metrics:new_counter(consumed_bytes),
+    folsom_metrics:new_histogram(latency),
+    folsom_metrics:new_counter(nr_of_consumers),
+    folsom_metrics:new_counter(nr_of_publishers),
+    folsom_metrics:tag_metric(published_msgs, vmq),
+    folsom_metrics:tag_metric(published_bytes, vmq),
+    folsom_metrics:tag_metric(consumed_msgs, vmq),
+    folsom_metrics:tag_metric(consumed_bytes, vmq),
+    folsom_metrics:tag_metric(nr_of_consumers, vmq),
+    folsom_metrics:tag_metric(nr_of_publishers, vmq),
+    folsom_metrics:tag_metric(latency, vmq_lats),
     case init:get_argument(scenario) of
         {ok, [[ScenarioFile]]} ->
             {ok, ScenarioConfig} = file:consult(ScenarioFile),
@@ -29,11 +44,10 @@ start() ->
             [MasterNode|Nodes] = proplists:get_value(test_nodes, ScenarioConfig, [node()]),
             case node() of
                 MasterNode ->
-                    vmq_bench_sup:add_stats_collector_master();
+                    vmq_bench_sup:add_stats_collector();
                 _ ->
                     wait_till_master_ready()
             end,
-            vmq_bench_sup:add_stats_collector(),
             wait_till_nodes_are_ready(Nodes),
 
             case node() of
@@ -48,7 +62,6 @@ start() ->
                     ignore
             end;
         _ ->
-            vmq_bench_sup:add_stats_collector(),
             wait_till_master_ready()
     end.
 
