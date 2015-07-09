@@ -4,7 +4,8 @@
 
 %% API functions
 -export([start_link/1,
-         get_topic/1]).
+         get_topic/1,
+         change_interval/2]).
 
 %% gen_server callbacks
 -export([init/1,
@@ -45,6 +46,9 @@ start_link(Config) ->
 
 get_topic(Pid) ->
     gen_server:call(Pid, get_topic).
+
+change_interval(Pid, NewInterval) ->
+    gen_server:cast(Pid, {change_interval, NewInterval}).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -105,6 +109,8 @@ init([Config]) ->
         StopAfter when is_integer(StopAfter) ->
             erlang:send_after(StopAfter, self(), stop_now)
     end,
+    erlang:send_after(StartAfter, self(), connect),
+    process_flag(trap_exit, true),
     {ok, #state{host=Host,
                 port=Port,
                 client_id=ClientId,
@@ -114,7 +120,7 @@ init([Config]) ->
                 topic=Topic,
                 qos=QoS,
                 interval=Interval,
-                msgs_per_step=MsgsPerStep}, StartAfter}.
+                msgs_per_step=MsgsPerStep}}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -146,6 +152,9 @@ handle_call(_Request, _From, State) ->
 %%                                  {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
+handle_cast({change_interval, NewInterval}, #state{socket=Sock} = State)
+    when Sock /= undefiend ->
+    {noreply, State#state{interval=NewInterval}};
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
@@ -159,7 +168,7 @@ handle_cast(_Msg, State) ->
 %%                                   {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
-handle_info(timeout, #state{socket=undefined} = State) ->
+handle_info(connect, #state{socket=undefined} = State) ->
     #state{client_id=ClientId,
            host=Host,
            port=Port,
@@ -174,12 +183,14 @@ handle_info(timeout, #state{socket=undefined} = State) ->
                                   [{hostname, Host}, {port, Port}]) of
         {ok, Socket} ->
             folsom_metrics:notify({nr_of_publishers, {inc, 1}}),
-            {noreply, State#state{socket=Socket}, Interval + random:uniform(500)};
+            erlang:send_after(Interval + random:uniform(500), self(), publish),
+            {noreply, State#state{socket=Socket}};
         {error, _} ->
             %% we retry in 1 second
-            {noreply, State, 1000}
+            erlang:send_after(1000, self(), connect),
+            {noreply, State}
     end;
-handle_info(timeout, #state{socket=Socket} = State) ->
+handle_info(publish, #state{socket=Socket} = State) ->
     #state{interval=Interval,
            topic=Topic,
            payload_generator=Generator,
@@ -189,6 +200,7 @@ handle_info(timeout, #state{socket=Socket} = State) ->
            qos=QoS,
            socket=Socket,
            counters=Counters} = State,
+    T1 = os:timestamp(),
     {NextMid, Mids, Frame} = stuff_the_frame(MsgsPerStep, Topic, QoS,
                                              Mid, Generator, PublishOpts),
 
@@ -196,13 +208,24 @@ handle_info(timeout, #state{socket=Socket} = State) ->
         ok ->
             L = iolist_size(Frame),
             NewCounters = await_acks(Socket, QoS, Mids, L, Counters),
+            T2 = os:timestamp(),
+            TimeDif = timer:now_diff(T2, T1) div 1000,
+            case TimeDif > Interval of
+                true ->
+                    % broker is very saturated
+                    erlang:send_after(Interval, self(), publish);
+                false ->
+                    % correct Interval
+                    erlang:send_after(Interval - TimeDif, self(), publish)
+            end,
             {noreply, State#state{next_mid=NextMid,
-                                  counters=NewCounters}, Interval};
+                                  counters=NewCounters}};
         {error, closed} ->
             folsom_metrics:notify({nr_of_publishers, {dec, 1}}),
+            erlang:send_after(1000, self(), connect),
             {noreply, State#state{socket=undefined,
                                   next_mid=1,
-                                  counters=vmq_bench_stats:init_counters(pub)}, 1000}
+                                  counters=vmq_bench_stats:init_counters(pub)}}
     end;
 
 handle_info(stop_now, State) ->
@@ -227,8 +250,8 @@ await_acks(_, 0, Mids, L, Counters) ->
 await_acks(Socket, 1, [Mid|Mids], L, Counters) ->
     Puback = packet:gen_puback(Mid),
     ok = packet:expect_packet(Socket, "puback", Puback),
-    vmq_bench_stats:incr_counters(1, byte_size(Puback), nil, Counters),
-    await_acks(Socket, 1, Mids, L, Counters);
+    NewCounters = vmq_bench_stats:incr_counters(1, byte_size(Puback), nil, Counters),
+    await_acks(Socket, 1, Mids, L, NewCounters);
 await_acks(_, 1, [], L, Counters) ->
     vmq_bench_stats:incr_counters(0, L, nil, Counters);
 await_acks(Socket, 2, [Mid|Mids], L, Counters) ->
@@ -238,8 +261,8 @@ await_acks(Socket, 2, [Mid|Mids], L, Counters) ->
     ok = gen_tcp:send(Socket, Pubrel),
     Pubcomp = packet:gen_pubcomp(Mid),
     ok = packet:expect_packet(Socket, "pubcomp", Pubcomp),
-    vmq_bench_stats:incr_counters(1, byte_size(Pubrel), nil, Counters),
-    await_acks(Socket, 2, Mids, L, Counters);
+    NewCounters = vmq_bench_stats:incr_counters(1, byte_size(Pubrel), nil, Counters),
+    await_acks(Socket, 2, Mids, L, NewCounters);
 await_acks(_, 2, [], L, Counters) ->
     vmq_bench_stats:incr_counters(0, L, nil, Counters).
 
@@ -256,6 +279,10 @@ await_acks(_, 2, [], L, Counters) ->
 %% @spec terminate(Reason, State) -> void()
 %% @end
 %%--------------------------------------------------------------------
+terminate(shutdown, _) ->
+    folsom_metrics:notify({nr_of_publishers, {dec, 1}}),
+    ok;
+
 terminate(_Reason, _State) ->
     ok.
 

@@ -26,7 +26,7 @@ start() ->
     folsom_metrics:new_counter(published_bytes),
     folsom_metrics:new_counter(consumed_msgs),
     folsom_metrics:new_counter(consumed_bytes),
-    folsom_metrics:new_histogram(latency),
+    folsom_metrics:new_histogram(latency, slide, 10),
     folsom_metrics:new_counter(nr_of_consumers),
     folsom_metrics:new_counter(nr_of_publishers),
     folsom_metrics:tag_metric(published_msgs, vmq),
@@ -41,10 +41,11 @@ start() ->
             {ok, ScenarioConfig} = file:consult(ScenarioFile),
             PublisherConfigs = proplists:get_all_values(publisher_config, ScenarioConfig),
             ConsumerConfigs = proplists:get_all_values(consumer_config, ScenarioConfig),
+            ForceFeedbackConfig = proplists:get_value(force_feedback, ScenarioConfig, []),
             [MasterNode|Nodes] = proplists:get_value(test_nodes, ScenarioConfig, [node()]),
             case node() of
                 MasterNode ->
-                    vmq_bench_sup:add_stats_collector();
+                    vmq_bench_sup:add_stats_collector(ForceFeedbackConfig);
                 _ ->
                     wait_till_master_ready()
             end,

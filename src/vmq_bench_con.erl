@@ -219,7 +219,10 @@ process_bytes(PS, Data, Socket, Counters) ->
                     process_bytes(emqtt_frame:initial_state(), Rest, Socket,
                                   vmq_bench_stats:incr_counters(0, L, LatPoint, Counters))
             end;
-        {ok, #mqtt_frame{fixed=#mqtt_frame_fixed{type=?PUBCOMP}}, Rest} ->
+        {ok, #mqtt_frame{fixed=#mqtt_frame_fixed{type=?PUBREL},
+                         variable=#mqtt_frame_publish{message_id=Mid}}, Rest} ->
+            Pubcomp = packet:gen_pubcomp(Mid),
+            ok = gen_tcp:send(Socket, Pubcomp),
             process_bytes(emqtt_frame:initial_state(), Rest, Socket,
                           vmq_bench_stats:incr_counters(1, L, nil, Counters));
         {ok, #mqtt_frame{}, Rest} ->

@@ -3,7 +3,11 @@
 -behaviour(gen_server).
 
 %% API functions
--export([start_link/0]).
+-export([start_link/1]).
+
+%% RPC export
+-export([adjust_interval/1,
+         adjust_publisher_pool_size/3]).
 
 %% gen_server callbacks
 -export([init/1,
@@ -13,7 +17,26 @@
          terminate/2,
          code_change/3]).
 
--record(state, {fd}).
+-record(state, {fd,
+                force_feedback_state,
+                last_dumped=os:timestamp()
+               }).
+-record(collect, {
+       nr_of_pubs=0,
+       nr_of_cons=0,
+       pub_msg_cnt=0,
+       pub_byte_cnt=0,
+       con_msg_cnt=0,
+       con_byte_cnt=0,
+       mean=0,
+       median=0,
+       std_dev=0,
+       perc_50=0,
+       perc_75=0,
+       perc_95=0,
+       perc_99=0,
+       perc_999=0
+      }).
 
 %%%===================================================================
 %%% API functions
@@ -26,8 +49,8 @@
 %% @spec start_link() -> {ok, Pid} | ignore | {error, Error}
 %% @end
 %%--------------------------------------------------------------------
-start_link() ->
-    gen_server:start_link({global, ?MODULE}, ?MODULE, [], []).
+start_link(Config) ->
+    gen_server:start_link({global, ?MODULE}, ?MODULE, Config, []).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -44,7 +67,7 @@ start_link() ->
 %%                     {stop, Reason}
 %% @end
 %%--------------------------------------------------------------------
-init([]) ->
+init(Config) ->
     {{YY, MM, DD}, {H, M, S}} = calendar:universal_time_to_local_time(
                                   calendar:universal_time()),
     FolderName = io_lib:format("bench_~p-~p-~p_~p.~p.~p", [YY, MM, DD, H, M, S]),
@@ -53,14 +76,40 @@ init([]) ->
     os:cmd("ln -s " ++ FolderName ++ " current_bench"),
     FileNameStr = filename:join(FolderName, "bench.csv"),
     {ok, Fd} = file:open(FileNameStr, [append]),
-    Header = io_lib:format("ts,nr_of_pub_msgs,nr_of_pub_data,nr_of_pubs,nr_of_con_msgs,nr_of_con_data,nr_of_cons,avg_latency,median_latency,variance_latency,lat_50,lat_75,lat_95,lat_99,lat_999~n", []),
+    Header = io_lib:format("ts,nr_of_pub_msgs,nr_of_pub_data,nr_of_pubs,nr_of_con_msgs,nr_of_con_data,nr_of_cons,avg_latency,median_latency,variance_latency,lat_50,lat_75,lat_95,lat_99,lat_999,lat_ctrl~n", []),
     file:write(Fd, Header),
-    {ok, [[ScenarioFile]]} = init:get_argument(scenario),
-    os:cmd("cp " ++ ScenarioFile ++ " current_bench/bench.scenario"),
-    {ok, ScenarioConfig} = file:consult(ScenarioFile),
-    write_json_file(ScenarioConfig),
+
+    FFState = init_force_feedback_state(Config),
     erlang:send_after(1000, self(), dump),
-    {ok, #state{fd=Fd}}.
+    {ok, #state{fd=Fd, force_feedback_state=FFState}}.
+
+init_force_feedback_state(Config) ->
+    FFAfter = proplists:get_value(force_feedback_after, Config, undefined),
+    case FFAfter of
+        undefined ->
+            undefined;
+        _ ->
+            FFSampleSize = proplists:get_value(force_feedback_sample_size, Config, FFAfter),
+            %% optimize send interval for 95% percentile <= 500ms
+            FFx = proplists:get_value(force_feedback_x, Config, {send_interval, 1000}),
+            FFSubState = init_force_feedback_sub_state(FFx),
+            %% FFx = proplists:get_value(force_feedback_x, Config, {publisher_pool_size, 1000}),
+            FFy = proplists:get_value(force_feedback_y, Config, {perc_95, 500}),
+            FFSamples = init_samples(FFSampleSize),
+            {FFAfter, FFAfter, FFx, FFy, FFSubState, FFSamples}
+    end.
+
+init_force_feedback_sub_state({send_interval, _}) -> [];
+init_force_feedback_sub_state({publisher_pool_size, _}) ->
+    case init:get_argument(scenario) of
+        {ok, [[ScenarioFile]]} ->
+            {ok, ScenarioConfig} = file:consult(ScenarioFile),
+            [PubConfig|_] = proplists:get_all_values(publisher_config, ScenarioConfig),
+            PubConfig;
+        _ ->
+            exit(cant_read_scenario_file)
+    end.
+
 
 %%--------------------------------------------------------------------
 %% @private
@@ -103,34 +152,59 @@ handle_cast(_Msg, State) ->
 %%                                   {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
-handle_info(dump, #state{fd=Fd} = State) ->
+handle_info(dump, #state{fd=Fd, force_feedback_state=FF, last_dumped=T1} = State) ->
     {Ret, _} = rpc:multicall(vmq_bench_stats, statistics, []),
-    {MegaSecs, Secs, _} = os:timestamp(),
+    {MegaSecs, Secs, _} = T2 = os:timestamp(),
+    TimeDiff1 = timer:now_diff(T2, T1) div 1000,
+    io:format("time diff ~p~n" ,[TimeDiff1]),
     TS = (MegaSecs * 1000000) + Secs,
-    {NrOfPubs, NrOfCons,
-     PubMsgCnt, PubByteCnt,
-     ConMsgCnt, ConByteCnt,
-     Mean, Median, StdDev, Perc50,
-     Perc75, Perc95, Perc99, Perc999} = get_avg(Ret),
-    file:write(Fd, io_lib:format("~p,~p,~p,~p,~p,~p,~p,~p,~p,~p,~p,~p,~p,~p,~p~n",
-                                 [TS,
-                                  PubMsgCnt,
-                                  PubByteCnt,
-                                  NrOfPubs,
-                                  ConMsgCnt,
-                                  ConByteCnt,
-                                  NrOfCons,
-                                  Mean,
-                                  Median,
-                                  StdDev,
-                                  Perc50,
-                                  Perc75,
-                                  Perc95,
-                                  Perc99,
-                                  Perc999])),
-
-    erlang:send_after(1000, self(), dump),
-    {noreply, State}.
+    #collect{
+       nr_of_pubs = NrOfPubs,
+       nr_of_cons = NrOfCons,
+       pub_msg_cnt = PubMsgCnt,
+       pub_byte_cnt = PubByteCnt,
+       con_msg_cnt = ConMsgCnt,
+       con_byte_cnt = ConByteCnt,
+       mean = Mean,
+       median = Median,
+       std_dev = StdDev,
+       perc_50 = Perc50,
+       perc_75 = Perc75,
+       perc_95 = Perc95,
+       perc_99 = Perc99,
+       perc_999 = Perc999
+      } = CollectAvg = get_avg(Ret, TimeDiff1),
+    {NewFF, {_,CtrlVar}}= maybe_force_feedback(FF, CollectAvg),
+    T3 = os:timestamp(),
+    TimeDiff2 = timer:now_diff(T3, T2) div 1000,
+    Str = io_lib:format("~p,~p,~p,~p,~p,~p,~p,~p,~p,~p,~p,~p,~p,~p,~p,~p~n",
+                                         [TS,
+                                          PubMsgCnt,
+                                          PubByteCnt,
+                                          NrOfPubs,
+                                          ConMsgCnt,
+                                          ConByteCnt,
+                                          NrOfCons,
+                                          Mean,
+                                          Median,
+                                          StdDev,
+                                          Perc50,
+                                          Perc75,
+                                          Perc95,
+                                          Perc99,
+                                          Perc999,
+                                          CtrlVar]),
+    case TimeDiff2 > 1000 of
+        true ->
+            %% we don't write to file in this case, as the values are older than one second
+            %% this means that the force feedback took too long
+            io:format(Str),
+            erlang:send_after(1000, self(), dump);
+        false ->
+            file:write(Fd, Str),
+            erlang:send_after(1000 - TimeDiff2, self(), dump)
+    end,
+    {noreply, State#state{force_feedback_state=NewFF, last_dumped=T2}}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -160,9 +234,9 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
-get_avg(Results) ->
+get_avg(Results, TimeDiff) ->
     N = length(Results),
-    {A,B,C,D,E,F,L} = get_avg(Results, {0,0,0,0,0,0,[]}),
+    {A,B,C,D,E,F,L} = get_ret_avg(Results, {0,0,0,0,0,0,[]}),
     LatsStats = bear:get_statistics_subset(L,[arithmetic_mean,
                                               min,
                                               max,
@@ -171,122 +245,172 @@ get_avg(Results) ->
                                               standard_deviation,
                                               variance]),
     Percentiles = proplists:get_value(percentile, LatsStats, []),
-    {trunc(A/N),
-     trunc(B/N),
-     trunc(C/N),
-     trunc(D/N),
-     trunc(E/N),
-     trunc(F/N),
-     trunc(proplists:get_value(arithmetic_mean, LatsStats, 0)),
-     trunc(proplists:get_value(median, LatsStats, 0)),
-     trunc(proplists:get_value(standard_deviation, LatsStats, 0)),
-     trunc(proplists:get_value(50, Percentiles, 0)),
-     trunc(proplists:get_value(75, Percentiles, 0)),
-     trunc(proplists:get_value(95, Percentiles, 0)),
-     trunc(proplists:get_value(99, Percentiles, 0)),
-     trunc(proplists:get_value(999, Percentiles, 0))}.
+    #collect{
+       nr_of_pubs = trunc(A/N),
+       nr_of_cons = trunc(B/N),
+       pub_msg_cnt = trunc(second_corrected(TimeDiff, C)/N),
+       pub_byte_cnt = trunc(second_corrected(TimeDiff, D)/N),
+       con_msg_cnt = trunc(second_corrected(TimeDiff, E)/N),
+       con_byte_cnt = trunc(second_corrected(TimeDiff, F)/N),
+       mean = trunc(proplists:get_value(arithmetic_mean, LatsStats, 0)),
+       median = trunc(proplists:get_value(median, LatsStats, 0)),
+       std_dev = trunc(proplists:get_value(standard_deviation, LatsStats, 0)),
+       perc_50 = trunc(proplists:get_value(50, Percentiles, 0)),
+       perc_75 = trunc(proplists:get_value(75, Percentiles, 0)),
+       perc_95 = trunc(proplists:get_value(95, Percentiles, 0)),
+       perc_99 = trunc(proplists:get_value(99, Percentiles, 0)),
+       perc_999 = trunc(proplists:get_value(999, Percentiles, 0))
+      }.
 
-get_avg([{NrOfPubs, NrOfCons,
+second_corrected(DurationInMs, Val) ->
+    (1000 * Val) / DurationInMs.
+
+get_ret_avg([{NrOfPubs, NrOfCons,
           PublishedMsgs, PublishedBytes,
           ConsumedMsgs, ConsumedBytes, Lats}|Rest],
         {ANrOfPubs, ANrOfCons,
          APublishedMsgs, APublishedBytes,
          AConsumedMsgs, AConsumedBytes, ALats}) ->
-    get_avg(Rest, {NrOfPubs + ANrOfPubs,
+    get_ret_avg(Rest, {NrOfPubs + ANrOfPubs,
                    NrOfCons + ANrOfCons,
                    PublishedMsgs + APublishedMsgs,
                    PublishedBytes + APublishedBytes,
                    ConsumedMsgs + AConsumedMsgs,
                    ConsumedBytes + AConsumedBytes,
                    Lats ++ ALats});
-get_avg([], Acc) -> Acc.
+get_ret_avg([], Acc) -> Acc.
 
-write_json_file(ScenarioConfig) ->
-    PublisherConfigs = proplists:get_all_values(publisher_config, ScenarioConfig),
-    PublisherSummary =
-    lists:foldl(fun(PubConfig, Acc) ->
-                        Nodes = proplists:get_value(nodes, PubConfig, [node()]),
-                        NrOfPublishers = length(Nodes) * proplists:get_value(max_concurrency, PubConfig, 1),
-                        Topics = proplists:get_value(topics, PubConfig, []),
-                        Partitions = length(lists:usort([T || {T, _} <- Topics])),
-                        QoS = [QoS || {_, QoS} <- Topics],
-                        TotalTopics = length(QoS),
-                        NrOfQoS0 = length([0 || 0 <- QoS]) * 100 / TotalTopics,
-                        NrOfQoS1 = length([1 || 1 <- QoS]) * 100 / TotalTopics,
-                        NrOfQoS2 = length([2 || 2 <- QoS]) * 100 / TotalTopics,
-                        PartitionSize = NrOfPublishers / Partitions,
-                        PubConnectRate = 1000 / proplists:get_value(setup_every, PubConfig, 10),
-                        BatchSize = proplists:get_value(msgs_per_step, PubConfig, 1),
-                        PublishRate = BatchSize * (1000 / proplists:get_value(interval, PubConfig, 1000)),
-                        ConnectOpts = proplists:get_value(connect_opts, PubConfig, []),
-                        KeepAlive = proplists:get_value(keepalive, ConnectOpts, 60),
-                        PublishOpts = proplists:get_value(publish_opts, PubConfig, []),
-                        Retain = proplists:get_value(retain, PublishOpts, false),
-                        Payload = proplists:get_value(payload, PubConfig, "test-message"),
-                        {MinimumSize, MaximumSize} =
-                        case {lists:keyfind(max, 1, Payload),
-                              lists:keyfind(min, 1, Payload)} of
-                            {false, false} ->
-                                S = byte_size(term_to_binary({os:timestamp(), list_to_binary(Payload)})),
-                                {S, S};
-                            {{_, Max}, false} ->
-                                MinS = byte_size(term_to_binary({os:timestamp(), <<>>})),
-                                MaxS = byte_size(term_to_binary({os:timestamp(), crypto:rand_bytes(Max)})),
-                                {MinS, MaxS};
-                            {false, {_, Min}} ->
-                                Max = 100000,
-                                MinS = byte_size(term_to_binary({os:timestamp(), crypto:rand_bytes(abs(Min - Max))})),
-                                MaxS = byte_size(term_to_binary({os:timestamp(), crypto:rand_bytes(Max)})),
-                                {MinS, MaxS};
-                            {{_, Max}, {_, Min}} ->
-                                MinS = byte_size(term_to_binary({os:timestamp(), crypto:rand_bytes(Min)})),
-                                MaxS = byte_size(term_to_binary({os:timestamp(), crypto:rand_bytes(Max)})),
-                                {MinS, MaxS}
-                        end,
-                        [[{nr_of_publishers, NrOfPublishers},
-                          {nr_of_partitions, Partitions},
-                          {partition_size, PartitionSize},
-                          {connect_rate, PubConnectRate},
-                          {keep_alive, KeepAlive},
-                          {retain, Retain},
-                          {qos_0, NrOfQoS0},
-                          {qos_1, NrOfQoS1},
-                          {qos_2, NrOfQoS2},
-                          {batch_size, BatchSize},
-                          {publish_rate, PublishRate},
-                          {min_message_size, MinimumSize},
-                          {max_message_size, MaximumSize}]|Acc]
-                end, [], PublisherConfigs),
+get_sample_avg(Collection) ->
+    get_sample_avg(Collection, length(Collection), #collect{}).
+get_sample_avg([Collect|Rest], S, AccCollect) ->
+    get_sample_avg(Rest, S, add_rec(Collect, AccCollect));
+get_sample_avg([], S, AccCollect) ->
+    div_rec(AccCollect, S).
 
-    ConsumerConfigs = proplists:get_all_values(consumer_config, ScenarioConfig),
-    ConsumerSummary =
-    lists:foldl(fun(ConConfig, Acc) ->
-                        Nodes = proplists:get_value(nodes, ConConfig, [node()]),
-                        NrOfConsumers = length(Nodes) * proplists:get_value(max_concurrency, ConConfig, 1),
-                        ConConnectRate = 1000 / proplists:get_value(setup_every, ConConfig, 10),
+add_rec(Rec1, Rec2) ->
+    [RecName|L1] = tuple_to_list(Rec1),
+    [RecName|L2] = tuple_to_list(Rec2),
+    {Sum, _} = lists:mapfoldl(fun(V, I) ->
+                                      {V + lists:nth(I, L2), I + 1}
+                              end, 1, L1),
+    list_to_tuple([RecName|Sum]).
 
-                        Topics = proplists:get_value(topics, ConConfig, []),
-                        Partitions = length(lists:usort([T || {T, _} <- Topics])),
-                        QoS = [QoS || {_, QoS} <- Topics],
-                        TotalTopics = length(QoS),
-                        NrOfQoS0 = length([0 || 0 <- QoS]) * 100 / TotalTopics,
-                        NrOfQoS1 = length([1 || 1 <- QoS]) * 100 / TotalTopics,
-                        NrOfQoS2 = length([2 || 2 <- QoS]) * 100 / TotalTopics,
-                        PartitionSize = NrOfConsumers / Partitions,
-                        ConnectOpts = proplists:get_value(connect_opts, ConConfig, []),
-                        KeepAlive = proplists:get_value(keepalive, ConnectOpts, 60),
-                        [[{nr_of_consumers, NrOfConsumers},
-                          {nr_of_partitions, Partitions},
-                          {partition_size, PartitionSize},
-                          {connect_rate, ConConnectRate},
-                          {keep_alive, KeepAlive},
-                          {qos_0, NrOfQoS0},
-                          {qos_1, NrOfQoS1},
-                          {qos_2, NrOfQoS2}]|Acc]
-                end, [], ConsumerConfigs),
+div_rec(Rec, D) ->
+    [RecName|L] = tuple_to_list(Rec),
+    list_to_tuple([RecName|[trunc(E / D) || E <- L]]).
+
+-define(LATENCY_TOLERANCE, 10). %% we tolerate a difference of 10ms
+
+maybe_force_feedback(undefined, _) -> {undefined, 0};
+maybe_force_feedback({FFAfter, FFAfterTmp, FFx, FFy, FFSt, FFSamples}, Collect)
+  when FFAfterTmp > 0->
+    {{FFAfter, FFAfterTmp - 1, FFx, FFy, FFSt, add_sample(Collect, FFSamples)}, FFx};
+maybe_force_feedback({FFAfter, 0, FFx, {YType, UpperBound} = FFy, FFSt, FFSamples}, Collect) ->
+    NewFFSamples = add_sample(Collect, FFSamples),
+    #collect{nr_of_pubs=AvgNrOfPubs,
+             pub_msg_cnt=AvgPubMsgCnt
+            } = AvgCollect = get_sample_avg(NewFFSamples),
+    AvgOptim = get_collect_val(YType, AvgCollect),
+    case (AvgNrOfPubs > 0) and (AvgPubMsgCnt > 0) of
+        true ->
+            MaxOptim = max(AvgOptim, get_collect_val(YType, Collect)),
+            {NewFFAfterTmp, {NewFFx, NewFFSt}} =
+            case abs(MaxOptim - UpperBound) > ?LATENCY_TOLERANCE of
+                false ->
+                    {FFAfter, {FFx, FFSt}};
+                true when MaxOptim > UpperBound ->
+                    {1, force_feedback(FFx, FFSt, trunc(MaxOptim - UpperBound))};
+                true ->
+                    {2, force_feedback(FFx, FFSt, trunc(MaxOptim - UpperBound))}
+            end,
+            {{FFAfter, NewFFAfterTmp, NewFFx, FFy, NewFFSt, NewFFSamples}, NewFFx};
+        false ->
+            {{FFAfter, FFAfter, FFx, FFy, FFSt, NewFFSamples}, FFx}
+    end.
+
+get_collect_val(mean, #collect{mean=Mean}) -> Mean;
+get_collect_val(median, #collect{median=Median}) -> Median;
+get_collect_val(std_dev, #collect{std_dev=StdDev}) -> StdDev;
+get_collect_val(perc_50, #collect{perc_50=Perc}) -> Perc;
+get_collect_val(perc_75, #collect{perc_75=Perc}) -> Perc;
+get_collect_val(perc_95, #collect{perc_95=Perc}) -> Perc;
+get_collect_val(perc_99, #collect{perc_99=Perc}) -> Perc;
+get_collect_val(perc_999, #collect{perc_999=Perc}) -> Perc.
+
+non_zero(V) when V =< 0 -> 1;
+non_zero(V) -> V.
+
+step(V) -> non_zero(V div 10).
+
+init_samples(undefined) -> [];
+init_samples(Size) ->
+    [#collect{}|| _ <- lists:seq(1, Size)].
+
+add_sample(Collect, Samples) ->
+    [_|T] = lists:reverse(Samples),
+    [Collect|lists:reverse(T)].
+
+force_feedback({send_interval, CurrentInterval}, FFSt, Change) ->
+    NewInterval =
+    case Change > 0 of
+        true ->
+            %% we need to increase the interval to lower the latency
+            CurrentInterval + step(abs(Change));
+        false ->
+            %% we need to decrease the interval to increase latency
+            CurrentInterval - non_zero(step(abs(Change)))
+    end,
+    rpc:eval_everywhere(?MODULE, adjust_interval, [NewInterval]),
+    {{send_interval, NewInterval}, FFSt};
+
+force_feedback({publisher_pool_size, CurrentPoolSize}, FFSt, Change) ->
+    NewPoolSize =
+    case Change > 0 of
+        true ->
+            %% we need to decrease pool size to lower the latency
+            CurrentPoolSize - non_zero(step(abs(Change)));
+        false ->
+            %% we need to increase the pool size to increase latency
+            CurrentPoolSize + step(abs(Change))
+    end,
+    Nodes = proplists:get_value(nodes, FFSt),
+    Topics = proplists:get_value(topics, FFSt, []),
+    Config = lists:keydelete(topics, 1, FFSt),
+    case Nodes of
+        undefined ->
+            adjust_publisher_pool_size(NewPoolSize, Topics, Config);
+        _ ->
+            rpc:eval_everywhere(Nodes, ?MODULE, adjust_publisher_pool_size, [NewPoolSize, Topics, Config])
+    end,
+    {{publisher_pool_size, NewPoolSize}, FFSt}.
+
+adjust_interval(NewInterval) ->
+    Children = supervisor:which_children(vmq_bench_pub_sup),
+    adjust_interval(Children, NewInterval).
+
+adjust_interval([{_, Pid, _, _}|Rest], NewInterval) when is_pid(Pid) ->
+    vmq_bench_pub:change_interval(Pid, NewInterval),
+    adjust_interval(Rest, NewInterval);
+adjust_interval([_|Rest], NewInterval) ->
+    adjust_interval(Rest, NewInterval);
+adjust_interval([], _) -> ok.
 
 
-    Summary = [{publishers, PublisherSummary},
-               {consumers, ConsumerSummary}],
-    io:format("config:~n ~p", [jsx:encode(Summary)]),
-    ok.
+adjust_publisher_pool_size(NewPoolSize, Topics, Config) ->
+    %% this could take longer if we are under high load
+    spawn(fun() ->
+                  NrOfPubNodes = length(proplists:get_value(nodes, Config, [node()])),
+                  Children = supervisor:which_children(vmq_bench_pub_sup),
+                  Diff = (length(Children) - NewPoolSize) div NrOfPubNodes,
+                  case Diff > 0 of
+                      true ->
+                          {ChildrenToTerminate, _} = lists:split(Diff, Children),
+                          lists:foreach(fun({_, ChildPid, _, _}) ->
+                                                vmq_bench_pub_sup:stop_publisher(ChildPid)
+                                        end, ChildrenToTerminate);
+                      false ->
+                          vmq_bench_pub_sup:start_publisher(abs(Diff), Topics, 0, Config)
+                  end
+          end).
+
+

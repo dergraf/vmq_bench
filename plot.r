@@ -40,15 +40,19 @@ plot5 <- bench_plot + labs(title = "Latencies in ms") +
             geom_line(aes(y = lat_75, color = "75%"), size=0.5) +
             geom_line(aes(y = lat_95, color = "95%"), size=0.5) +
             geom_line(aes(y = lat_99, color = "99%"), size=0.5) +
-            geom_line(aes(y = lat_999, color = "99.9%"), size=0.5) +
+            geom_line(aes(y = lat_999, color = "99.9%"), size=0.5)
 
-pushViewport(viewport(layout = grid.layout(4, 1, heights=c(1.5, 1.5, 0.5, 0.5))))
+plot6 <- bench_plot + labs(title = "Force Feedback Control Variable") +
+            geom_line(aes(y = lat_ctrl, color = "Value"))
+
+pushViewport(viewport(layout = grid.layout(5, 1, heights=c(1.5, 1.5, 0.5, 0.5, 0.5))))
 vplayout <- function(x,y) viewport(layout.pos.row = x, layout.pos.col = y)
 
 print(plot1, vp=vplayout(1,1))
 print(plot5, vp=vplayout(2,1))
-print(plot3, vp=vplayout(3,1))
-print(plot4, vp=vplayout(4,1))
+print(plot6, vp=vplayout(3,1))
+print(plot3, vp=vplayout(4,1))
+print(plot4, vp=vplayout(5,1))
 
 png(file = "current_bench/pubsub.png", width = 1200, height = 400)
 print(plot1)

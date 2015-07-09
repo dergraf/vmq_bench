@@ -5,7 +5,8 @@
 %% API functions
 -export([start_link/0,
          start_publishers/1,
-         start_publisher/4]).
+         start_publisher/4,
+         stop_publisher/1]).
 
 %% Supervisor callbacks
 -export([init/1]).
@@ -51,6 +52,8 @@ start_publisher(N, [T|Topics], Sleep, Config) ->
     timer:sleep(Sleep),
     start_publisher(N - 1, Topics ++ [T], Sleep, Config).
 
+stop_publisher(ChildPid) ->
+    supervisor:terminate_child(?MODULE, ChildPid).
 
 %%%===================================================================
 %%% Supervisor callbacks
