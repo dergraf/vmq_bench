@@ -29,6 +29,7 @@ start_link() ->
     supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
 start_publishers([Config|Rest]) ->
+    WaitForPublishStart = proplists:get_value(wait_for_start, Config, false),
     spawn(
       fun() ->
               Nodes = proplists:get_value(nodes, Config),
@@ -37,14 +38,30 @@ start_publishers([Config|Rest]) ->
               Sleep = proplists:get_value(setup_every, Config, 10),
               case Nodes of
                   undefined ->
-                      start_publisher(MaxConcurrency, Topics, Sleep, lists:keydelete(topics, 1, Config));
+                      start_publishers(WaitForPublishStart, MaxConcurrency, Topics, Sleep, lists:keydelete(topics, 1, Config));
                   _ ->
-                      [rpc:cast(Node, ?MODULE, start_publisher, [MaxConcurrency, Topics, Sleep, lists:keydelete(topics, 1, Config)])
+                      [rpc:cast(Node, ?MODULE, start_publishers, [WaitForPublishStart, MaxConcurrency, Topics, Sleep, lists:keydelete(topics, 1, Config)])
                        || Node <- Nodes]
               end
       end),
     start_publishers(Rest);
 start_publishers([]) -> ok.
+
+start_publishers(true, MaxConcurrency, Topics, Sleep, Config) ->
+    start_publisher_acc(MaxConcurrency, Topics, Sleep, Config, []);
+start_publishers(false, MaxConcurrency, Topics, Sleep, Config) ->
+    start_publisher(MaxConcurrency, Topics, Sleep, Config).
+
+start_publisher_acc(0, _, _, _, Acc) ->
+    lists:foreach(fun(Pid) ->
+                          Pid ! publish
+                  end, Acc);
+start_publisher_acc(N, [T|Topics], Sleep, Config, Acc) ->
+    {ok, Pid} = supervisor:start_child(?MODULE, [[{topic, T}|Config]]),
+    timer:sleep(Sleep),
+    start_publisher_acc(N - 1, Topics ++ [T], Sleep, Config, [Pid|Acc]).
+
+
 
 start_publisher(0, _, _, _) -> ok;
 start_publisher(N, [T|Topics], Sleep, Config) ->

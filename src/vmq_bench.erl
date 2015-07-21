@@ -53,8 +53,15 @@ start() ->
 
             case node() of
                 MasterNode ->
-                    spawn_link(fun() ->
-                                       vmq_bench_pub_sup:start_publishers(PublisherConfigs)
+                    spawn_link(
+                      fun() ->
+                              lists:foreach(
+                                fun(PublisherConfig) ->
+                                        PubImplMod = proplists:get_value(impl_mod, PublisherConfig, vmq_bench_pub),
+                                        PubSupervisor = get_supervisor_mod(PubImplMod),
+
+                                        PubSupervisor:start_publishers([PublisherConfig])
+                                end, PublisherConfigs)
                                end),
                     spawn_link(fun() ->
                                        vmq_bench_con_sup:start_consumers(ConsumerConfigs)
@@ -95,6 +102,9 @@ wait_till_nodes_are_ready([Node|Nodes]) ->
             wait_till_nodes_are_ready(Nodes ++ [Node])
     end.
 
+
+get_supervisor_mod(vmq_bench_pub) -> vmq_bench_pub_sup;
+get_supervisor_mod(vmq_bench_pubsubself) -> vmq_bench_pubsubself_sup.
 
 
 

@@ -30,5 +30,6 @@ init([]) ->
     {ok, { {one_for_one, 5, 10},
            [
             ?CHILD(vmq_bench_pub_sup, supervisor, []),
-            ?CHILD(vmq_bench_con_sup, supervisor, [])]}}.
+            ?CHILD(vmq_bench_con_sup, supervisor, []),
+            ?CHILD(vmq_bench_pubsubself_sup, supervisor, [])]}}.
 

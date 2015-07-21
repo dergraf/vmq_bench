@@ -63,10 +63,20 @@ init([Config]) ->
     ClientId = proplists:get_value(client_id, ConnectOpts,
                                    "vmq-con-" ++ integer_to_list(erlang:phash2({A,B,C}))),
     Keepalive = proplists:get_value(keepalive, ConnectOpts, 60), %% packet.erl uses 60 as default
-    erlang:send_after(Keepalive  * 1000, self(), ping),
 
-    Topics = proplists:get_value(topics, Config, [{"/test/topic", 0}]),
-    {Topic, QoS} = lists:nth(random:uniform(length(Topics)), Topics),
+    case Keepalive of
+        0 ->
+            ignore;
+        _ ->
+            erlang:send_after(Keepalive  * 1000, self(), ping)
+    end,
+
+    {Topic, QoS} =
+    case proplists:get_value(topic, Config) of
+        {{Prefix, client_id}, TQoS} ->
+            {Prefix ++ ClientId, TQoS};
+        V -> V
+    end,
     {Host, Port} = lists:nth(random:uniform(length(Hosts)), Hosts),
 
     case proplists:get_value(stop_after, Config, 0) of
@@ -135,6 +145,7 @@ handle_info(timeout, #state{socket=undefined} = State) ->
     Connack = packet:gen_connack(),
     {ok, Socket} = packet:do_client_connect(Connect, Connack,
                                             [{hostname, Host}, {port, Port}]),
+    process_flag(trap_exit, true),
     folsom_metrics:notify({nr_of_consumers, {inc, 1}}),
     Subscribe = packet:gen_subscribe(1, Topic, QoS),
     ok = gen_tcp:send(Socket, Subscribe),
@@ -151,13 +162,8 @@ handle_info(ping, #state{socket=Socket, keepalive=Keepalive} = State) ->
     erlang:send_after(Keepalive  * 1000, self(), ping),
     {noreply, State};
 handle_info({tcp, Socket, Data}, #state{socket=Socket, parser_state=PS,
-                                        topic=Topic, counters=Counters} = State) ->
+                                        counters=Counters} = State) ->
     {NewPS, NewCounters} = process_bytes(PS, Data, Socket, Counters),
-    case Topic of
-        "long/lat" -> timer:sleep(500);
-        _ -> ok
-    end,
-
     inet:setopts(Socket, [{active, once}]),
     {noreply, State#state{parser_state=NewPS, counters=NewCounters}};
 handle_info({tcp_closed, Socket}, #state{socket=Socket} = State) ->
@@ -179,6 +185,7 @@ handle_info(stop_now, State) ->
 %% @end
 %%--------------------------------------------------------------------
 terminate(_Reason, _State) ->
+    folsom_metrics:notify({nr_of_consumers, {dec, 1}}),
     ok.
 
 %%--------------------------------------------------------------------
@@ -203,19 +210,26 @@ process_bytes(PS, Data, Socket, Counters) ->
                fixed=#mqtt_frame_fixed{type=?PUBLISH, qos=QoS},
                variable=#mqtt_frame_publish{message_id=Mid},
                payload=Payload}, Rest} ->
-            {LatPoint, _} = binary_to_term(Payload),
+            {LatPoint, SenderPid} =
+            case binary_to_term(Payload) of
+                {LP, _} -> {LP, undefined};
+                {LP, Pid, _} -> {LP, Pid}
+            end,
             case QoS of
                 0 ->
+                    confirm_to_sender(SenderPid),
                     process_bytes(emqtt_frame:initial_state(), Rest, Socket,
                                   vmq_bench_stats:incr_counters(1, L, LatPoint, Counters));
                 1 ->
                     Puback = packet:gen_puback(Mid),
                     ok = gen_tcp:send(Socket, Puback),
+                    confirm_to_sender(SenderPid),
                     process_bytes(emqtt_frame:initial_state(), Rest, Socket,
                                   vmq_bench_stats:incr_counters(1, L, LatPoint, Counters));
                 2 ->
                     Pubrec = packet:gen_pubrec(Mid),
                     ok = gen_tcp:send(Socket, Pubrec),
+                    confirm_to_sender(SenderPid),
                     process_bytes(emqtt_frame:initial_state(), Rest, Socket,
                                   vmq_bench_stats:incr_counters(0, L, LatPoint, Counters))
             end;
@@ -231,3 +245,6 @@ process_bytes(PS, Data, Socket, Counters) ->
         {error, _} ->
             {emqtt_frame:initial_state(), Counters}
     end.
+
+confirm_to_sender(undefined) -> ok;
+confirm_to_sender(Pid) -> Pid ! publish_confirm.

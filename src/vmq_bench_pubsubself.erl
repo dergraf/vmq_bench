@@ -1,4 +1,5 @@
--module(vmq_bench_pub).
+-module(vmq_bench_pubsubself).
+-include_lib("emqtt_commons/include/emqtt_frame.hrl").
 
 -behaviour(gen_server).
 
@@ -26,11 +27,11 @@
                 topic,
                 qos,
                 interval,
-                publish_confirm,
-                wait_for_start,
                 msgs_per_step,
                 next_mid=1,
-                counters=vmq_bench_stats:init_counters(pub)}).
+                parser_state=emqtt_frame:initial_state(),
+                pub_counters=vmq_bench_stats:init_counters(pub),
+                sub_counters=vmq_bench_stats:init_counters(con)}).
 
 %%%===================================================================
 %%% API functions
@@ -84,41 +85,26 @@ init([Config]) ->
             {Prefix ++ ClientId, TQoS};
         V -> V
     end,
-    Payload =
-    case proplists:get_value(payload, Config) of
-        undefined -> "test-message";
-        {fixed_size, Size} when is_integer(Size) ->
-            crypto:rand_bytes(Size);
-        P when is_list(P) -> P
-    end,
+    Payload = proplists:get_value(payload, Config, "test-message"),
     PublishOpts = proplists:get_value(publish_opts, Config, []),
     PayloadGenerator =
-    case is_list(Payload) of
-        true ->
-            case {lists:keyfind(max, 1, Payload),
-                  lists:keyfind(min, 1, Payload)} of
-                {false, false} ->
-                    Bb = list_to_binary(Payload),
-                    fun() -> Bb end;
-                {{_, Max}, false} ->
-                    fun() ->
-                            crypto:rand_bytes(random:uniform(Max))
-                    end;
-                {false, {_, Min}} ->
-                    fun() ->
-                            Max = random:uniform(100000),
-                            crypto:rand_bytes(abs(Min - Max))
-                    end;
-                {{_, Max}, {_, Min}} ->
-                    fun() -> crypto:rand_bytes(
-                               abs(random:uniform(Max)
-                                   - random:uniform(Min))) end
+    case {lists:keyfind(max, 1, Payload),
+          lists:keyfind(min, 1, Payload)} of
+        {false, false} -> fun() -> list_to_binary(Payload) end;
+        {{_, Max}, false} ->
+            fun() ->
+                    crypto:rand_bytes(random:uniform(Max))
             end;
-        false when is_binary(Payload) ->
-            fun() -> Payload end
+        {false, {_, Min}} ->
+            fun() ->
+                    Max = random:uniform(100000),
+                    crypto:rand_bytes(abs(Min - Max))
+            end;
+        {{_, Max}, {_, Min}} ->
+            fun() -> crypto:rand_bytes(
+                       abs(random:uniform(Max)
+                           - random:uniform(Min))) end
     end,
-    PublishConfirm = proplists:get_value(publish_confirm, Config, false),
-    WaitForPublishStart = proplists:get_value(wait_for_start, Config, false),
     {Host, Port} = lists:nth(random:uniform(length(Hosts)), Hosts),
 
     case proplists:get_value(stop_after, Config, 0) of
@@ -136,8 +122,6 @@ init([Config]) ->
                 payload_generator=PayloadGenerator,
                 topic=Topic,
                 qos=QoS,
-                wait_for_start=WaitForPublishStart,
-                publish_confirm=PublishConfirm,
                 interval=Interval,
                 msgs_per_step=MsgsPerStep}}.
 
@@ -187,12 +171,11 @@ handle_cast(_Msg, State) ->
 %%                                   {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
-handle_info(connect, #state{socket=undefined} = State) ->
+handle_info(connect, #state{socket=undefined, topic=Topic, qos=QoS} = State) ->
     #state{client_id=ClientId,
            host=Host,
            port=Port,
            interval=Interval,
-           wait_for_start=WaitForPublishStart,
            connect_opts=ConnectOpts} = State,
     {A,B,C} = now(),
     random:seed(A, B, C),
@@ -203,110 +186,122 @@ handle_info(connect, #state{socket=undefined} = State) ->
                                   [{hostname, Host}, {port, Port}]) of
         {ok, Socket} ->
             folsom_metrics:notify({nr_of_publishers, {inc, 1}}),
-            case WaitForPublishStart of
-                true -> ignore;
-                false ->
-                    erlang:send_after(Interval + random:uniform(500), self(), publish)
-            end,
+            folsom_metrics:notify({nr_of_consumers, {inc, 1}}),
+            Subscribe = packet:gen_subscribe(1, Topic, QoS),
+            ok = gen_tcp:send(Socket, Subscribe),
+            Suback = packet:gen_suback(1, QoS),
+            ok = packet:expect_packet(Socket, "suback", Suback),
+            inet:setopts(Socket, [{active, once}]),
+            erlang:send_after(Interval + random:uniform(500), self(), publish),
             {noreply, State#state{socket=Socket}};
         {error, _} ->
             %% we retry in 1 second
             erlang:send_after(1000, self(), connect),
             {noreply, State}
     end;
+handle_info({tcp, Socket, Data}, #state{interval=Interval} = State) ->
+    NewNewState =
+    case process_data(Data, false, State) of
+        {NewState, true} ->
+            erlang:send_after(Interval, self(), publish),
+            NewState;
+        {NewState, false} ->
+            NewState
+    end,
+    inet:setopts(Socket, [{active, once}]),
+    {noreply, NewNewState};
+
 handle_info(publish, #state{socket=Socket} = State) ->
-    #state{interval=Interval,
-           topic=Topic,
+    #state{topic=Topic,
            payload_generator=Generator,
            publish_opts=PublishOpts,
-           msgs_per_step=MsgsPerStep,
            next_mid=Mid,
-           publish_confirm=PublishConfirm,
            qos=QoS,
            socket=Socket,
-           counters=Counters} = State,
-    T1 = os:timestamp(),
-    {NextMid, Mids, Frame} = stuff_the_frame(MsgsPerStep, PublishConfirm, Topic, QoS,
-                                             Mid, Generator, PublishOpts),
+           pub_counters=PubCounters} = State,
+    Payload = term_to_binary({os:timestamp(), Generator()}),
+    PublishFrame = packet:gen_publish(Topic, QoS, Payload,
+                                 [{mid, Mid} | PublishOpts]),
 
-    case gen_tcp:send(Socket, Frame) of
+    case gen_tcp:send(Socket, PublishFrame) of
         ok ->
-            L = iolist_size(Frame),
-            NewCounters = await_acks(Socket, QoS, Mids, L, Counters),
-            T2 = os:timestamp(),
-            TimeDif = timer:now_diff(T2, T1) div 1000,
-            case {PublishConfirm, TimeDif > Interval} of
-                {true, _} ->
-                    ignore;
-                {false, true} ->
-                    % broker is very saturated
-                    erlang:send_after(Interval, self(), publish);
-                {false, false} ->
-                    % correct Interval
-                    erlang:send_after(Interval - TimeDif, self(), publish)
+            L = byte_size(PublishFrame),
+            NewPubCounters =
+            case QoS of
+                0 ->
+                    vmq_bench_stats:incr_counters(1, L, nil, PubCounters);
+                _ ->
+                    vmq_bench_stats:incr_counters(0, L, nil, PubCounters)
             end,
-            {noreply, State#state{next_mid=NextMid,
-                                  counters=NewCounters}};
+            {noreply, State#state{next_mid=next_mid(Mid),
+                                  pub_counters=NewPubCounters}};
         {error, closed} ->
             folsom_metrics:notify({nr_of_publishers, {dec, 1}}),
+            folsom_metrics:notify({nr_of_consumers, {dec, 1}}),
             erlang:send_after(1000, self(), connect),
             {noreply, State#state{socket=undefined,
                                   next_mid=1,
-                                  counters=vmq_bench_stats:init_counters(pub)}}
-    end;
-handle_info(publish_confirm, #state{interval=Interval} = State) ->
-    case Interval of
-        0 ->
-            handle_info(publish, State);
-        _ ->
-            erlang:send_after(Interval, self(), publish),
-            {noreply, State}
+                                  pub_counters=vmq_bench_stats:init_counters(pub),
+                                  sub_counters=vmq_bench_stats:init_counters(con)}}
     end;
 
 handle_info(stop_now, State) ->
     folsom_metrics:notify({nr_of_publishers, {dec, 1}}),
     {stop, normal, State}.
 
-stuff_the_frame(MsgsPerStep, PublishConfirm, Topic, QoS, Mid, Generator, PublishOpts) ->
-    stuff_the_frame(MsgsPerStep, PublishConfirm, Topic, QoS, Mid, Generator, PublishOpts, [], []).
-
-stuff_the_frame(0, _, _, _, Mid, _, _, Mids, Buf) ->
-    {Mid, lists:reverse(Mids), lists:reverse(Buf)};
-stuff_the_frame(MsgsPerStep, PublishConfirm, Topic, QoS, Mid, Generator, PublishOpts, Mids, Buf) ->
-    Payload = case PublishConfirm of
-                  true ->
-                        term_to_binary({os:timestamp(), self(), Generator()});
-                  false ->
-                        term_to_binary({os:timestamp(), Generator()})
-              end,
-    Publish = packet:gen_publish(Topic, QoS, Payload,
-                                 [{mid, Mid} | PublishOpts]),
-    NewBuf = [Publish|Buf],
-    stuff_the_frame(MsgsPerStep - 1, PublishConfirm, Topic, QoS, next_mid(Mid), Generator,
-                    PublishOpts, [Mid|Mids], NewBuf).
-
-await_acks(_, 0, Mids, L, Counters) ->
-    vmq_bench_stats:incr_counters(length(Mids), L, nil, Counters);
-await_acks(Socket, 1, [Mid|Mids], L, Counters) ->
-    Puback = packet:gen_puback(Mid),
-    ok = packet:expect_packet(Socket, "puback", Puback),
-    NewCounters = vmq_bench_stats:incr_counters(1, byte_size(Puback), nil, Counters),
-    await_acks(Socket, 1, Mids, L, NewCounters);
-await_acks(_, 1, [], L, Counters) ->
-    vmq_bench_stats:incr_counters(0, L, nil, Counters);
-await_acks(Socket, 2, [Mid|Mids], L, Counters) ->
-    Pubrec = packet:gen_pubrec(Mid),
-    ok = packet:expect_packet(Socket, "pubrec", Pubrec),
-    Pubrel = packet:gen_pubrel(Mid),
-    ok = gen_tcp:send(Socket, Pubrel),
-    Pubcomp = packet:gen_pubcomp(Mid),
-    ok = packet:expect_packet(Socket, "pubcomp", Pubcomp),
-    NewCounters = vmq_bench_stats:incr_counters(1, byte_size(Pubrel), nil, Counters),
-    await_acks(Socket, 2, Mids, L, NewCounters);
-await_acks(_, 2, [], L, Counters) ->
-    vmq_bench_stats:incr_counters(0, L, nil, Counters).
-
-
+process_data(Data, TriggerPublish, #state{socket=Socket, parser_state=PS,
+                                          pub_counters=PubCounters,
+                                          sub_counters=SubCounters} = State) ->
+    case emqtt_frame:parse(Data, PS) of
+        {more, MorePS} ->
+            {State#state{parser_state=MorePS}, TriggerPublish};
+        {ok, #mqtt_frame{
+                fixed=#mqtt_frame_fixed{type=?PUBLISH, qos=QoS},
+                variable=#mqtt_frame_publish{message_id=MId},
+                payload=Payload}, Rest} ->
+            %% We received a publish frame
+            L = byte_size(Payload),
+            {LatPoint, _} = binary_to_term(Payload),
+            {NewSubCounters, NewTriggerPublish} =
+            case QoS of
+                0 ->
+                    {vmq_bench_stats:incr_counters(1, L, LatPoint, SubCounters), true};
+                1 ->
+                    Puback = packet:gen_puback(MId),
+                    ok = gen_tcp:send(Socket, Puback),
+                    {vmq_bench_stats:incr_counters(1, L, LatPoint, SubCounters), true};
+                2 ->
+                    Pubrec = packet:gen_pubrec(MId),
+                    ok = gen_tcp:send(Socket, Pubrec),
+                    {vmq_bench_stats:incr_counters(0, L, LatPoint, SubCounters), TriggerPublish}
+            end,
+            process_data(Rest, NewTriggerPublish, State#state{parser_state=emqtt_frame:initial_state(),
+                                                              sub_counters=NewSubCounters});
+        {ok, #mqtt_frame{
+                fixed=#mqtt_frame_fixed{type=?PUBREL},
+                variable=#mqtt_frame_publish{message_id=MId}}, Rest} ->
+            Pubcomp = packet:gen_pubcomp(MId),
+            ok = gen_tcp:send(Socket, Pubcomp),
+            NewSubCounters = vmq_bench_stats:incr_counters(1, 0, nil, SubCounters),
+            process_data(Rest, true, State#state{parser_state=emqtt_frame:initial_state(),
+                                                 sub_counters=NewSubCounters});
+        {ok, #mqtt_frame{
+                fixed=#mqtt_frame_fixed{type=?PUBACK}}, Rest} ->
+            NewPubCounters = vmq_bench_stats:incr_counters(1, 0, nil, PubCounters),
+            process_data(Rest, TriggerPublish, State#state{parser_state=emqtt_frame:initial_state(),
+                                                           pub_counters=NewPubCounters});
+        {ok, #mqtt_frame{
+                fixed=#mqtt_frame_fixed{type=?PUBREC},
+                variable=#mqtt_frame_publish{message_id=MId}}, Rest} ->
+            Pubrel = packet:gen_pubrel(MId),
+            ok = gen_tcp:send(Socket, Pubrel),
+            process_data(Rest, TriggerPublish, State#state{parser_state=emqtt_frame:initial_state()});
+        {ok, #mqtt_frame{
+                fixed=#mqtt_frame_fixed{type=?PUBCOMP}}, Rest} ->
+            NewPubCounters = vmq_bench_stats:incr_counters(1, 0, nil, PubCounters),
+            process_data(Rest, TriggerPublish, State#state{parser_state=emqtt_frame:initial_state(),
+                                                           pub_counters=NewPubCounters})
+    end.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -321,6 +316,7 @@ await_acks(_, 2, [], L, Counters) ->
 %%--------------------------------------------------------------------
 terminate(shutdown, _) ->
     folsom_metrics:notify({nr_of_publishers, {dec, 1}}),
+    folsom_metrics:notify({nr_of_consumers, {dec, 1}}),
     ok;
 
 terminate(_Reason, _State) ->
@@ -342,3 +338,4 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 next_mid(65535) -> 1;
 next_mid(Mid) -> Mid + 1.
+

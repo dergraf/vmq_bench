@@ -1,15 +1,18 @@
--module(vmq_bench_con_sup).
+-module(vmq_bench_pubsubself_sup).
 
 -behaviour(supervisor).
 
 %% API functions
 -export([start_link/0,
-         start_consumers/1,
-         start_consumers/3,
-         start_consumer/4]).
+         start_publishers/1,
+         start_publisher/4,
+         stop_publisher/1]).
 
 %% Supervisor callbacks
 -export([init/1]).
+
+-define(CHILD(Id, Mod, Type, Args), {Id, {Mod, start_link, Args},
+                                     permanent, 5000, Type, [Mod]}).
 
 %%%===================================================================
 %%% API functions
@@ -25,33 +28,32 @@
 start_link() ->
     supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
-start_consumers([Config|Rest]) ->
+start_publishers([Config|Rest]) ->
     spawn(
       fun() ->
               Nodes = proplists:get_value(nodes, Config),
               MaxConcurrency = proplists:get_value(max_concurrency, Config, 1),
+              Topics = proplists:get_value(topics, Config, []),
               Sleep = proplists:get_value(setup_every, Config, 10),
               case Nodes of
                   undefined ->
-                      start_consumers(MaxConcurrency, Sleep, Config);
+                      start_publisher(MaxConcurrency, Topics, Sleep, lists:keydelete(topics, 1, Config));
                   _ ->
-                      io:format("--- spawn consumer on remote nodes ~p~n", [Nodes]),
-                      [rpc:cast(Node, ?MODULE, start_consumers, [MaxConcurrency, Sleep, Config]) || Node <- Nodes]
+                      [rpc:cast(Node, ?MODULE, start_publisher, [MaxConcurrency, Topics, Sleep, lists:keydelete(topics, 1, Config)])
+                       || Node <- Nodes]
               end
       end),
-    start_consumers(Rest);
-start_consumers([]) -> ok.
+    start_publishers(Rest);
+start_publishers([]) -> ok.
 
-start_consumers(MaxConcurrency, Sleep, Config) ->
-    Topics = proplists:get_value(topics, Config, [{"/test/topic", 0}]),
-    start_consumer(MaxConcurrency, Sleep, Topics, lists:keydelete(topics, 1, Config)).
-
-start_consumer(0, _, _, _) -> ok;
-start_consumer(N, Sleep, [T|Topics], Config) ->
+start_publisher(0, _, _, _) -> ok;
+start_publisher(N, [T|Topics], Sleep, Config) ->
     {ok, _} = supervisor:start_child(?MODULE, [[{topic, T}|Config]]),
     timer:sleep(Sleep),
-    start_consumer(N - 1, Sleep, Topics ++ [T], Config).
+    start_publisher(N - 1, Topics ++ [T], Sleep, Config).
 
+stop_publisher(ChildPid) ->
+    supervisor:terminate_child(?MODULE, ChildPid).
 
 %%%===================================================================
 %%% Supervisor callbacks
@@ -71,9 +73,9 @@ start_consumer(N, Sleep, [T|Topics], Config) ->
 %% @end
 %%--------------------------------------------------------------------
 init([]) ->
-    {ok, {{simple_one_for_one, 5, 10},
-          [{vmq_bench_con, {vmq_bench_con, start_link, []},
-                            permanent, 5000, worker, [vmq_bench_con]}]}}.
+    {ok, {{simple_one_for_one, 50, 1},
+          [{vmq_bench_pubsubself, {vmq_bench_pubsubself, start_link, []},
+            permanent, 5000, worker, [vmq_bench_pubsubself]}]}}.
 
 %%%===================================================================
 %%% Internal functions

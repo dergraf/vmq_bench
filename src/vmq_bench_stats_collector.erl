@@ -301,7 +301,7 @@ div_rec(Rec, D) ->
 
 -define(LATENCY_TOLERANCE, 10). %% we tolerate a difference of 10ms
 
-maybe_force_feedback(undefined, _) -> {undefined, 0};
+maybe_force_feedback(undefined, _) -> {undefined, {undefined, 0}};
 maybe_force_feedback({FFAfter, FFAfterTmp, FFx, FFy, FFSt, FFSamples}, Collect)
   when FFAfterTmp > 0->
     {{FFAfter, FFAfterTmp - 1, FFx, FFy, FFSt, add_sample(Collect, FFSamples)}, FFx};

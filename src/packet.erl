@@ -79,9 +79,6 @@ do_client_connect(ConnectPacket, ConnackPacket, Opts) ->
     ConnackError = proplists:get_value(connack_error, Opts, "connack"),
     case gen_tcp:connect(Host, Port, [binary, {reuseaddr, true},{active, false}, {packet, raw}], Timeout) of
         {ok, Socket} ->
-            {ok, BufSizes} = inet:getopts(Socket, [sndbuf, recbuf, buffer]),
-            BufSize = lists:max([Sz || {_Opt, Sz} <- BufSizes]),
-            inet:setopts(Socket, [{buffer, BufSize}]),
             gen_tcp:send(Socket, ConnectPacket),
             case expect_packet(Socket, ConnackError, ConnackPacket) of
                 ok ->
