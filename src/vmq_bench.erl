@@ -88,7 +88,7 @@ wait_till_nodes_are_ready([]) -> ok;
 wait_till_nodes_are_ready([Node|Nodes]) ->
     case net_adm:ping(Node) of
         pong ->
-            case rpc:call(Node, erlang, whereis, [vmq_bench_stats]) of
+            case rpc:call(Node, erlang, whereis, [vmq_bench_sup]) of
                 undefined ->
                     io:format("--- slave ~p not ready~n", [Node]),
                     timer:sleep(1000),

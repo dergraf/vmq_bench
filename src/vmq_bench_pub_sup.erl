@@ -5,6 +5,7 @@
 %% API functions
 -export([start_link/0,
          start_publishers/1,
+	 start_publishers/5,
          start_publisher/4,
          stop_publisher/1]).
 
