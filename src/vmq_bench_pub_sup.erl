@@ -55,7 +55,7 @@ start_publishers(false, MaxConcurrency, Topics, Sleep, Config) ->
 
 start_publisher_acc(0, _, _, _, Acc) ->
     lists:foreach(fun(Pid) ->
-                          Pid ! publish
+                          Pid ! publish_start
                   end, Acc);
 start_publisher_acc(N, [T|Topics], Sleep, Config, Acc) ->
     {ok, Pid} = supervisor:start_child(?MODULE, [[{topic, T}|Config]]),

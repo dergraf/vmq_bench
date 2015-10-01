@@ -214,6 +214,9 @@ handle_info(connect, #state{socket=undefined} = State) ->
             erlang:send_after(1000, self(), connect),
             {noreply, State}
     end;
+handle_info(publish_start, State) ->
+    erlang:send_after(random:uniform(1000), self(), publish),
+    {noreply, State};
 handle_info(publish, #state{socket=Socket} = State) ->
     #state{interval=Interval,
            topic=Topic,
