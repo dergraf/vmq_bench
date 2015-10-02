@@ -235,8 +235,7 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 get_avg(Results, TimeDiff) ->
-    N = length(Results),
-    {A,B,C,D,E,F,L} = get_ret_avg(Results, {0,0,0,0,0,0,[]}),
+    {A,B,C,D,E,F,L} = sumup_ret(Results, {0,0,0,0,0,0,[]}),
     LatsStats = bear:get_statistics_subset(L,[arithmetic_mean,
                                               min,
                                               max,
@@ -246,12 +245,12 @@ get_avg(Results, TimeDiff) ->
                                               variance]),
     Percentiles = proplists:get_value(percentile, LatsStats, []),
     #collect{
-       nr_of_pubs = trunc(A/N),
-       nr_of_cons = trunc(B/N),
-       pub_msg_cnt = trunc(second_corrected(TimeDiff, C)/N),
-       pub_byte_cnt = trunc(second_corrected(TimeDiff, D)/N),
-       con_msg_cnt = trunc(second_corrected(TimeDiff, E)/N),
-       con_byte_cnt = trunc(second_corrected(TimeDiff, F)/N),
+       nr_of_pubs = A,
+       nr_of_cons = B,
+       pub_msg_cnt = trunc(second_corrected(TimeDiff, C)),
+       pub_byte_cnt = trunc(second_corrected(TimeDiff, D)),
+       con_msg_cnt = trunc(second_corrected(TimeDiff, E)),
+       con_byte_cnt = trunc(second_corrected(TimeDiff, F)),
        mean = trunc(proplists:get_value(arithmetic_mean, LatsStats, 0)),
        median = trunc(proplists:get_value(median, LatsStats, 0)),
        std_dev = trunc(proplists:get_value(standard_deviation, LatsStats, 0)),
@@ -265,20 +264,20 @@ get_avg(Results, TimeDiff) ->
 second_corrected(DurationInMs, Val) ->
     (1000 * Val) / DurationInMs.
 
-get_ret_avg([{NrOfPubs, NrOfCons,
+sumup_ret([{NrOfPubs, NrOfCons,
           PublishedMsgs, PublishedBytes,
           ConsumedMsgs, ConsumedBytes, Lats}|Rest],
         {ANrOfPubs, ANrOfCons,
          APublishedMsgs, APublishedBytes,
          AConsumedMsgs, AConsumedBytes, ALats}) ->
-    get_ret_avg(Rest, {NrOfPubs + ANrOfPubs,
+    sumup_ret(Rest, {NrOfPubs + ANrOfPubs,
                    NrOfCons + ANrOfCons,
                    PublishedMsgs + APublishedMsgs,
                    PublishedBytes + APublishedBytes,
                    ConsumedMsgs + AConsumedMsgs,
                    ConsumedBytes + AConsumedBytes,
                    Lats ++ ALats});
-get_ret_avg([], Acc) -> Acc.
+sumup_ret([], Acc) -> Acc.
 
 get_sample_avg(Collection) ->
     get_sample_avg(Collection, length(Collection), #collect{}).
