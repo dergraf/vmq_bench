@@ -202,6 +202,9 @@ handle_info(connect, #state{socket=undefined} = State) ->
     case packet:do_client_connect(Connect, Connack,
                                   [{hostname, Host}, {port, Port}]) of
         {ok, Socket} ->
+            {ok, BufSizes} = inet:getopts(Socket, [sndbuf, recbuf, buffer]),
+            BufSize = lists:max([Sz || {_, Sz} <- BufSizes]),
+            inet:setopts(Socket, [{buffer, BufSize}]),
             folsom_metrics:notify({nr_of_publishers, {inc, 1}}),
             case WaitForPublishStart of
                 true -> ignore;

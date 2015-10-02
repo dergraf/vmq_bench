@@ -185,6 +185,9 @@ handle_info(connect, #state{socket=undefined, topic=Topic, qos=QoS} = State) ->
     case packet:do_client_connect(Connect, Connack,
                                   [{hostname, Host}, {port, Port}]) of
         {ok, Socket} ->
+            {ok, BufSizes} = inet:getopts(Socket, [sndbuf, recbuf, buffer]),
+            BufSize = lists:max([Sz || {_, Sz} <- BufSizes]),
+            inet:setopts(Socket, [{buffer, BufSize}]),
             folsom_metrics:notify({nr_of_publishers, {inc, 1}}),
             folsom_metrics:notify({nr_of_consumers, {inc, 1}}),
             Subscribe = packet:gen_subscribe(1, Topic, QoS),
