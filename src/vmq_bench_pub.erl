@@ -213,8 +213,9 @@ handle_info(connect, #state{socket=undefined} = State) ->
                     erlang:send_after(Interval + random:uniform(500), self(), publish)
             end,
             {noreply, State#state{socket=Socket}};
-        {error, _} ->
+        {error, Reason} ->
             %% we retry in 1 second
+            io:format("[~p] can't connect to broker at ~p:~p due to ~p~n", [ClientId, Host, Port, Reason]),
             erlang:send_after(1000, self(), connect),
             {noreply, State}
     end;
