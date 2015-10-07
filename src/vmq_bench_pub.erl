@@ -67,7 +67,7 @@ change_interval(Pid, NewInterval) ->
 %%                     {stop, Reason}
 %% @end
 %%--------------------------------------------------------------------
-init([Config]) ->
+init([Id, Config]) ->
     {A, B, C} = now(),
     random:seed(A, B, C),
     StartAfter = proplists:get_value(start_after, Config, 0),
@@ -78,7 +78,7 @@ init([Config]) ->
     Nodes = lists:sort([node()|nodes()]),
     NodeId = proplists:get_value(node(), lists:zip(Nodes, lists:seq(1, length(Nodes)))),
     ClientId = proplists:get_value(client_id, ConnectOpts,
-                                   "vmq-pub-" ++ integer_to_list(NodeId) ++ "-" ++ integer_to_list(erlang:phash2({A,B,C, node()}))),
+                                   "vmq-pub-" ++ integer_to_list(NodeId) ++ "-" ++ integer_to_list(Id)),
 
     {Topic, QoS} =
     case proplists:get_value(topic, Config, {"/test/topic", 0}) of

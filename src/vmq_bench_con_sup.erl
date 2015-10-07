@@ -48,7 +48,7 @@ start_consumers(MaxConcurrency, Sleep, Config) ->
 
 start_consumer(0, _, _, _) -> ok;
 start_consumer(N, Sleep, [T|Topics], Config) ->
-    {ok, _} = supervisor:start_child(?MODULE, [[{topic, T}|Config]]),
+    {ok, _} = supervisor:start_child(?MODULE, [N, [{topic, T}|Config]]),
     timer:sleep(Sleep),
     start_consumer(N - 1, Sleep, Topics ++ [T], Config).
 

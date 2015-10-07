@@ -58,7 +58,7 @@ start_publisher_acc(0, _, _, _, Acc) ->
                           Pid ! publish_start
                   end, Acc);
 start_publisher_acc(N, [T|Topics], Sleep, Config, Acc) ->
-    {ok, Pid} = supervisor:start_child(?MODULE, [[{topic, T}|Config]]),
+    {ok, Pid} = supervisor:start_child(?MODULE, [N, [{topic, T}|Config]]),
     timer:sleep(Sleep),
     start_publisher_acc(N - 1, Topics ++ [T], Sleep, Config, [Pid|Acc]).
 
@@ -66,7 +66,7 @@ start_publisher_acc(N, [T|Topics], Sleep, Config, Acc) ->
 
 start_publisher(0, _, _, _) -> ok;
 start_publisher(N, [T|Topics], Sleep, Config) ->
-    {ok, _} = supervisor:start_child(?MODULE, [[{topic, T}|Config]]),
+    {ok, _} = supervisor:start_child(?MODULE, [N, [{topic, T}|Config]]),
     timer:sleep(Sleep),
     start_publisher(N - 1, Topics ++ [T], Sleep, Config).
 
