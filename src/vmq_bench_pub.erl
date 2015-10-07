@@ -75,8 +75,10 @@ init([Config]) ->
     MsgsPerStep = proplists:get_value(msgs_per_step, Config, 1),
     Hosts = proplists:get_value(hosts, Config, [{"localhost", 1883}]),
     ConnectOpts = proplists:get_value(connect_opts, Config, []),
+    Nodes = lists:sort([node()|nodes()]),
+    NodeId = proplists:get_value(node(), lists:zip(Nodes, lists:seq(1, length(Nodes)))),
     ClientId = proplists:get_value(client_id, ConnectOpts,
-                                   "vmq-pub-" ++ integer_to_list(erlang:phash2({A,B,C, node()}))),
+                                   "vmq-pub-" ++ integer_to_list(NodeId) ++ "-" ++ integer_to_list(erlang:phash2({A,B,C, node()}))),
 
     {Topic, QoS} =
     case proplists:get_value(topic, Config, {"/test/topic", 0}) of

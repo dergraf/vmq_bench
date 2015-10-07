@@ -60,8 +60,10 @@ init([Config]) ->
     StartAfter = proplists:get_value(start_after, Config, 0),
     Hosts = proplists:get_value(hosts, Config, [{"localhost", 1883}]),
     ConnectOpts = proplists:get_value(connect_opts, Config, []),
+    Nodes = lists:sort([node()|nodes()]),
+    NodeId = proplists:get_value(node(), lists:zip(Nodes, lists:seq(1, length(Nodes)))),
     ClientId = proplists:get_value(client_id, ConnectOpts,
-                                   "vmq-con-" ++ integer_to_list(erlang:phash2({A,B,C}))),
+                                   "vmq-con-" ++ integer_to_list(NodeId) ++ "-" ++ integer_to_list(erlang:phash2({A,B,C, node()}))),
     Keepalive = proplists:get_value(keepalive, ConnectOpts, 60), %% packet.erl uses 60 as default
 
     case Keepalive of
