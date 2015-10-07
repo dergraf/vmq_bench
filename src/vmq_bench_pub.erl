@@ -3,7 +3,7 @@
 -behaviour(gen_server).
 
 %% API functions
--export([start_link/1,
+-export([start_link/2,
          get_topic/1,
          change_interval/2]).
 
@@ -43,8 +43,8 @@
 %% @spec start_link() -> {ok, Pid} | ignore | {error, Error}
 %% @end
 %%--------------------------------------------------------------------
-start_link(Config) ->
-    gen_server:start_link(?MODULE, [Config], []).
+start_link(Id, Config) ->
+    gen_server:start_link(?MODULE, [Id, Config], []).
 
 get_topic(Pid) ->
     gen_server:call(Pid, get_topic).
